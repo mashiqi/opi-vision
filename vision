@@ -1,0 +1,776 @@
+#!/usr/bin/env bash
+set -u
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+VISION_DIR=${VISION_DIR:-$SCRIPT_DIR}
+DEFAULT_VISION_SIZE=1280x720
+DEFAULT_VISION_FPS=30
+DEFAULT_VISION_ENCODER=hardware
+DEFAULT_VISION_ROTATE=180
+
+show_help() {
+    cat <<'EOF'
+用法:
+  ./vision [--start] [--size 640x360|1280x720|1920x1080] [--fps 1-30]
+           [--encoder hardware|software] [--rotate 0|90|180|270]
+  ./vision --status
+  ./vision --log
+  ./vision --stop
+  ./vision --help
+
+启动选项:
+  --size 640x360|1280x720|1920x1080
+      设置画面尺寸. 默认: 1280x720.
+  --fps 1-30
+      设置整数帧率. 默认: 30.
+  --encoder hardware|software
+      hardware使用Cedarc/VE2硬编码, software使用CPU x264enc.
+      默认: hardware.
+  --rotate 0|90|180|270
+      按顺时针方向旋转画面. 默认: 180. 当前不提供镜像功能.
+      Camera硬编码的1920x1080不支持90或270.
+
+管理命令:
+  --status  显示运行摘要和系统状态.
+  --log     显示进程详情和最近日志.
+  --stop    停止视觉服务.
+  --help    显示帮助信息.
+
+说明:
+  不指定操作时等同于--start, 并询问是否启用YOLO26s + ByteTrack.
+  3秒无输入时进入Camera模式.
+  启动选项只能与--start一起使用.
+  视频码率按尺寸自动选择: 360p为1 Mbps, 720p为2.5 Mbps, 1080p为4 Mbps.
+  硬编码启动失败时不会静默回退. 可显式使用--encoder software.
+  运行中不能切换参数或模式. 请先执行./vision --stop.
+EOF
+}
+
+argument_error() {
+    echo "错误: $1" >&2
+    echo >&2
+    show_help >&2
+    exit 2
+}
+
+action=
+vision_size=$DEFAULT_VISION_SIZE
+vision_fps=$DEFAULT_VISION_FPS
+vision_encoder=$DEFAULT_VISION_ENCODER
+vision_rotate=$DEFAULT_VISION_ROTATE
+vision_audio_enabled=auto
+size_seen=false
+fps_seen=false
+encoder_seen=false
+rotate_seen=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --start|--status|--log|--stop|--help)
+            [[ -z "$action" ]] || argument_error "每次必须且只能指定一个动作."
+            action=$1
+            shift
+            ;;
+        --size)
+            [[ "$size_seen" == false ]] || argument_error "--size 不可重复."
+            [[ $# -ge 2 && "$2" != --* ]] || argument_error "--size 后缺少尺寸."
+            size_seen=true
+            vision_size=$2
+            shift 2
+            ;;
+        --fps)
+            [[ "$fps_seen" == false ]] || argument_error "--fps 不可重复."
+            [[ $# -ge 2 && "$2" != --* ]] || argument_error "--fps 后缺少帧率."
+            fps_seen=true
+            vision_fps=$2
+            shift 2
+            ;;
+        --encoder)
+            [[ "$encoder_seen" == false ]] || argument_error "--encoder 不可重复."
+            [[ $# -ge 2 && "$2" != --* ]] || argument_error "--encoder 后缺少编码方式."
+            encoder_seen=true
+            vision_encoder=$2
+            shift 2
+            ;;
+        --rotate)
+            [[ "$rotate_seen" == false ]] || argument_error "--rotate 不可重复."
+            [[ $# -ge 2 && "$2" != --* ]] || argument_error "--rotate 后缺少旋转角度."
+            rotate_seen=true
+            vision_rotate=$2
+            shift 2
+            ;;
+        *) argument_error "未知参数: $1" ;;
+    esac
+done
+[[ -n "$action" ]] || action=--start
+[[ "$size_seen" == false || "$action" == --start ]] || argument_error "--size 只能与 --start 同时使用."
+[[ "$fps_seen" == false || "$action" == --start ]] || argument_error "--fps 只能与 --start 同时使用."
+[[ "$encoder_seen" == false || "$action" == --start ]] || argument_error "--encoder 只能用于启动."
+[[ "$rotate_seen" == false || "$action" == --start ]] || argument_error "--rotate 只能用于启动."
+case "$vision_size" in
+    640x360|1280x720|1920x1080) ;;
+    *) argument_error "非法尺寸: $vision_size" ;;
+esac
+[[ "$vision_fps" =~ ^([1-9]|[12][0-9]|30)$ ]] ||
+    argument_error "非法帧率: $vision_fps (必须是 1～30 的整数)"
+case "$vision_encoder" in
+    hardware|software) ;;
+    *) argument_error "非法编码方式: $vision_encoder (必须是 hardware 或 software)" ;;
+esac
+case "$vision_rotate" in
+    0|90|180|270) ;;
+    *) argument_error "非法旋转角度: $vision_rotate (必须是 0、90、180 或 270)" ;;
+esac
+
+if [[ "$action" == --help ]]; then show_help; exit 0; fi
+
+PROFILE_FILE="$VISION_DIR/run/profile"
+profile_raw_value() {
+    local key=$1
+    [[ -r "$PROFILE_FILE" ]] || return 1
+    awk -F= -v key="$key" '$1==key {print $2; found=1; exit} END {if (!found) exit 1}' "$PROFILE_FILE"
+}
+
+vision_mode=camera
+if [[ "$action" != --start && -r "$PROFILE_FILE" ]]; then
+    saved_size=$(profile_raw_value size 2>/dev/null || true)
+    saved_fps=$(profile_raw_value fps 2>/dev/null || true)
+    saved_mode=$(profile_raw_value mode 2>/dev/null || true)
+    saved_encoder=$(profile_raw_value encoder 2>/dev/null || true)
+    saved_rotate=$(profile_raw_value rotate 2>/dev/null || true)
+    saved_audio=$(profile_raw_value audio_enabled 2>/dev/null || true)
+    case "$saved_size" in 640x360|1280x720|1920x1080) vision_size=$saved_size ;; esac
+    [[ "$saved_fps" =~ ^([1-9]|[12][0-9]|30)$ ]] && vision_fps=$saved_fps
+    case "$saved_mode" in camera|yolo) vision_mode=$saved_mode ;; esac
+    case "$saved_encoder" in hardware|software) vision_encoder=$saved_encoder ;; esac
+    case "$saved_rotate" in 0|90|180|270) vision_rotate=$saved_rotate ;; esac
+    case "$saved_audio" in yes|no) vision_audio_enabled=$saved_audio ;; esac
+fi
+
+export VISION_DIR VISION_SIZE=$vision_size VISION_FPS=$vision_fps \
+    VISION_MODE=$vision_mode VISION_ENCODER=$vision_encoder \
+    VISION_ROTATE=$vision_rotate VISION_AUDIO_ENABLED=$vision_audio_enabled
+# shellcheck source=vision-common.sh
+source "$SCRIPT_DIR/vision-common.sh"
+
+PUBLISHER_PGID_FILE="$RUNTIME_DIR/publisher.pgid"
+STOP_INT_TRIES=${STOP_INT_TRIES:-20}
+STOP_TERM_TRIES=${STOP_TERM_TRIES:-20}
+STOP_WAIT_SECONDS=${STOP_WAIT_SECONDS:-0.1}
+
+process_matches() {
+    local pid=$1 expected=$2 actual_exe expected_exe
+    [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+    actual_exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+    expected_exe=$(readlink -f "$expected" 2>/dev/null || true)
+    [[ -n "$actual_exe" && -n "$expected_exe" && "$actual_exe" == "$expected_exe" ]] && return 0
+    grep -Fzqx -- "$expected" "/proc/$pid/cmdline" 2>/dev/null
+}
+
+pid_file_is_running() {
+    local file=$1 expected=$2 pid
+    [[ -r "$file" ]] || return 1
+    read -r pid < "$file"
+    process_matches "$pid" "$expected"
+}
+
+group_exists() { [[ "$1" =~ ^[0-9]+$ ]] && kill -0 -- "-$1" 2>/dev/null; }
+
+group_has_vision_member() {
+    local pgid=$1
+    group_exists "$pgid" || return 1
+    pgrep -g "$pgid" -f -- "$SCRIPT_DIR/vision-common.sh" >/dev/null 2>&1 ||
+    pgrep -g "$pgid" -f -- "$YOLO_BIN" >/dev/null 2>&1 ||
+        pgrep -g "$pgid" -f -- "$NV12_NORMALIZER_BIN" >/dev/null 2>&1 ||
+        pgrep -g "$pgid" -f -- "$HW_ENCODER_BIN" >/dev/null 2>&1 ||
+        pgrep -g "$pgid" -f -- "$BACKGROUND_MUSIC_FILE" >/dev/null 2>&1 ||
+        pgrep -g "$pgid" -f -- 'udp://127.0.0.1:8891|udpsink.*port=8891' >/dev/null 2>&1
+}
+
+publisher_is_running() {
+    local pgid
+    [[ -r "$PUBLISHER_PGID_FILE" ]] || return 1
+    read -r pgid < "$PUBLISHER_PGID_FILE"
+    group_has_vision_member "$pgid"
+}
+
+profile_value() { profile_raw_value "$1"; }
+
+profile_is_valid() {
+    local size fps mode encoder rotate audio
+    local output_width output_height bitrate
+    size=$(profile_value size 2>/dev/null || true)
+    fps=$(profile_value fps 2>/dev/null || true)
+    mode=$(profile_value mode 2>/dev/null || true)
+    encoder=$(profile_value encoder 2>/dev/null || true)
+    rotate=$(profile_value rotate 2>/dev/null || true)
+    audio=$(profile_value audio_enabled 2>/dev/null || true)
+    output_width=$(profile_value output_width 2>/dev/null || true)
+    output_height=$(profile_value output_height 2>/dev/null || true)
+    bitrate=$(profile_value bitrate 2>/dev/null || true)
+    [[ "$fps" =~ ^([1-9]|[12][0-9]|30)$ ]] || return 1
+    [[ "$encoder" == hardware || "$encoder" == software ]] || return 1
+    [[ "$rotate" == 0 || "$rotate" == 90 ||
+       "$rotate" == 180 || "$rotate" == 270 ]] || return 1
+    [[ "$audio" == yes || "$audio" == no ]] || return 1
+    [[ "$output_width" =~ ^[0-9]+$ && "$output_height" =~ ^[0-9]+$ &&
+       "$bitrate" =~ ^[0-9]+$ ]] || return 1
+    case "$size:$mode" in
+        640x360:camera|640x360:yolo|1280x720:camera|1280x720:yolo|1920x1080:camera|1920x1080:yolo) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+runtime_state_exists() {
+    [[ -e "$RUNTIME_DIR/mediamtx.pid" || -e "$PUBLISHER_PGID_FILE" ||
+       -e "$RUNTIME_DIR/isp3a.pid" || -e "$PROFILE_FILE" ]]
+}
+
+cleanup_runtime_state() {
+    rm -f "$RUNTIME_DIR/mediamtx.pid" "$RUNTIME_DIR/isp3a.pid" \
+        "$PUBLISHER_PGID_FILE" "$RUNTIME_DIR/publisher.pid" "$PROFILE_FILE" \
+        "$RUNTIME_DIR/bytetrack-metrics.json" "$RUNTIME_DIR/llm_bridge.pid" \
+        "$RUNTIME_DIR/dashboard.pid"
+}
+
+signal_process_until_stopped() {
+    local pid=$1 expected=$2 signal tries i
+    shift 2
+    while [[ $# -gt 0 ]]; do
+        signal=$1; tries=$2; shift 2
+        process_matches "$pid" "$expected" || return 0
+        kill "-$signal" "$pid" 2>/dev/null || true
+        for ((i=0; i<tries; i++)); do
+            process_matches "$pid" "$expected" || return 0
+            sleep "$STOP_WAIT_SECONDS"
+        done
+    done
+    ! process_matches "$pid" "$expected"
+}
+
+signal_group_until_stopped() {
+    local pgid=$1 signal tries i
+    shift
+    while [[ $# -gt 0 ]]; do
+        signal=$1; tries=$2; shift 2
+        group_has_vision_member "$pgid" || return 0
+        kill "-$signal" -- "-$pgid" 2>/dev/null || true
+        for ((i=0; i<tries; i++)); do
+            group_has_vision_member "$pgid" || return 0
+            sleep "$STOP_WAIT_SECONDS"
+        done
+    done
+    ! group_has_vision_member "$pgid"
+}
+
+stop_pid_file() {
+    local name=$1 file=$2 expected=$3 pid
+    [[ -r "$file" ]] || { echo "$name 未运行."; return 0; }
+    read -r pid < "$file"
+    if ! process_matches "$pid" "$expected"; then
+        echo "$name 的 PID 状态无效."
+        return 0
+    fi
+    signal_process_until_stopped "$pid" "$expected" INT "$STOP_INT_TRIES" TERM "$STOP_TERM_TRIES" KILL 1 && {
+        echo "$name 已停止."; return 0;
+    }
+    echo "$name 无法停止 (PID $pid)." >&2
+    return 1
+}
+
+stop_publisher() {
+    local pgid
+    [[ -r "$PUBLISHER_PGID_FILE" ]] || { echo "视觉推流未运行."; return 0; }
+    read -r pgid < "$PUBLISHER_PGID_FILE"
+    group_has_vision_member "$pgid" || { echo "视觉推流的 PGID 状态无效."; return 0; }
+    signal_group_until_stopped "$pgid" INT "$STOP_INT_TRIES" TERM "$STOP_TERM_TRIES" KILL 1 && {
+        echo "视觉推流已停止."; return 0;
+    }
+    echo "视觉推流无法停止 (进程组 $pgid)." >&2
+    return 1
+}
+
+discovered_publisher_pgids() {
+    local pattern pid pgid current_pgid
+    current_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)
+    for pattern in "$SCRIPT_DIR/vision-common.sh" "$YOLO_BIN" "$NV12_NORMALIZER_BIN" \
+        "$HW_ENCODER_BIN" "$BACKGROUND_MUSIC_FILE" \
+        'udp://127.0.0.1:8891|udpsink.*port=8891'; do
+        while read -r pid; do
+            [[ "$pid" =~ ^[0-9]+$ ]] || continue
+            pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+            [[ "$pgid" =~ ^[0-9]+$ && "$pgid" != "$current_pgid" ]] && echo "$pgid"
+        done < <(pgrep -f -- "$pattern" 2>/dev/null || true)
+    done | sort -u
+}
+
+stop_discovered_processes() {
+    local pgid pid
+    while read -r pgid; do
+        [[ -n "$pgid" ]] && signal_group_until_stopped "$pgid" INT "$STOP_INT_TRIES" TERM "$STOP_TERM_TRIES" KILL 1 || true
+    done < <(discovered_publisher_pgids)
+    while read -r pid; do
+        [[ -n "$pid" ]] || continue
+        if process_matches "$pid" "$ISP3A_BIN"; then
+            signal_process_until_stopped "$pid" "$ISP3A_BIN" INT "$STOP_INT_TRIES" TERM "$STOP_TERM_TRIES" KILL 1 || true
+        elif process_matches "$pid" "$MEDIAMTX_BIN"; then
+            signal_process_until_stopped "$pid" "$MEDIAMTX_BIN" INT "$STOP_INT_TRIES" TERM "$STOP_TERM_TRIES" KILL 1 || true
+        fi
+    done < <(pgrep -f -- "$ISP3A_BIN|$MEDIAMTX_BIN.*$MEDIAMTX_CONFIG" 2>/dev/null || true)
+}
+
+module_processes_running() {
+    [[ -n "$(discovered_publisher_pgids)" ]] ||
+        pgrep -f -- "$ISP3A_BIN|$MEDIAMTX_BIN.*$MEDIAMTX_CONFIG" >/dev/null 2>&1
+}
+
+report_external_blockers() {
+    local result=0 pids lines
+    if command -v fuser >/dev/null 2>&1; then
+        pids=$(fuser "$VIDEO_DEVICE" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' || true)
+        [[ -z "$pids" ]] || { echo "$VIDEO_DEVICE 被非本模块进程占用: $pids" >&2; result=1; }
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        lines=$(ss -H -ltnup 2>/dev/null | awk '$5 ~ /:(1935|8000|8001|8189|8554|8888|8889|8892)$/ {print}' || true)
+        [[ -z "$lines" ]] || { echo "MediaMTX 端口被非本模块进程占用: " >&2; echo "$lines" >&2; result=1; }
+    fi
+    return "$result"
+}
+
+show_hardware_fallback_hint() {
+    echo "如需改用CPU软编码，请执行:" >&2
+    echo "  ./vision --start --encoder software" >&2
+}
+
+verify_hardware_encoder() {
+    local missing
+    [[ -x "$HW_ENCODER_BIN" ]] || {
+        echo "找不到硬编码器: $HW_ENCODER_BIN" >&2
+        show_hardware_fallback_hint
+        return 1
+    }
+    for file in /dev/cedar_dev_ve2 /dev/dma_heap/system; do
+        [[ -e "$file" ]] || {
+            echo "缺少硬编码设备: $file" >&2
+            show_hardware_fallback_hint
+            return 1
+        }
+        [[ -r "$file" && -w "$file" ]] || {
+            echo "当前用户无权访问硬编码设备: $file" >&2
+            echo "请确认用户属于 video 组并重新登录." >&2
+            show_hardware_fallback_hint
+            return 1
+        }
+    done
+    missing=$(ldd "$HW_ENCODER_BIN" 2>/dev/null |
+        awk '
+            /not found/ {
+                if (count++ > 0) {
+                    printf ","
+                }
+                printf "%s", $1
+            }
+            END {
+                if (count > 0) {
+                    print ""
+                }
+            }
+        ')
+    [[ -z "$missing" ]] || {
+        echo "Cedarc动态库缺失: $missing" >&2
+        echo "请先安装 src/src-cedarc/vendor 中的 Cedarc 运行时." >&2
+        show_hardware_fallback_hint
+        return 1
+    }
+}
+
+stop_vision() {
+    local result=0
+    stop_pid_file "ISP 3A" "$RUNTIME_DIR/isp3a.pid" "$ISP3A_BIN" || result=1
+    stop_publisher || result=1
+    stop_pid_file "MediaMTX" "$RUNTIME_DIR/mediamtx.pid" "$MEDIAMTX_BIN" || result=1
+    stop_discovered_processes
+    if module_processes_running; then
+        echo "本模块仍有进程未停止." >&2
+        result=1
+    else
+        cleanup_runtime_state
+    fi
+    maintain_logs || result=1
+    report_external_blockers || result=1
+    return "$result"
+}
+
+service_fully_running() {
+    pid_file_is_running "$RUNTIME_DIR/mediamtx.pid" "$MEDIAMTX_BIN" &&
+        publisher_is_running && pid_file_is_running "$RUNTIME_DIR/isp3a.pid" "$ISP3A_BIN" &&
+        profile_is_valid
+}
+
+format_grouped_integer() {
+    printf '%s\n' "$1" | sed -E ':group; s/([0-9])([0-9]{3})(,|$)/\1,\2\3/; t group'
+}
+
+show_temperatures() {
+    local zone
+    echo "温度:"
+    for zone in /sys/class/thermal/thermal_zone*; do
+        [[ -r "$zone/type" && -r "$zone/temp" ]] || continue
+        printf '  %-20s ' "$(<"$zone/type")"
+        awk '{printf "%.1f C\n", $1/1000}' "$zone/temp"
+    done
+}
+
+show_cpu_frequencies() {
+    local policy current_mhz max_mhz
+    echo "CPU 频率:"
+    for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+        [[ -r "$policy/scaling_cur_freq" && -r "$policy/scaling_max_freq" ]] || continue
+        current_mhz=$(format_grouped_integer "$(( $(<"$policy/scaling_cur_freq") / 1000 ))")
+        max_mhz=$(format_grouped_integer "$(( $(<"$policy/scaling_max_freq") / 1000 ))")
+        printf '  %s: current=%s MHz, max=%s MHz\n' "$(basename "$policy")" "$current_mhz" "$max_mhz"
+    done
+}
+
+show_cpu_usage() {
+    local usage mpstat_command=${VISION_MPSTAT_COMMAND:-mpstat}
+    if ! command -v "$mpstat_command" >/dev/null 2>&1; then
+        echo "CPU: 当前使用率无法读取, 请先手动安装 sysstat (提供 mpstat)."
+        return 0
+    fi
+    usage=$(LC_ALL=C "$mpstat_command" 1 1 2>/dev/null |
+        awk '/Average:/ && $2=="all" {printf "%.1f%%", 100-$NF; exit}' || true)
+    if [[ "$usage" =~ ^[0-9]+([.][0-9]+)?%$ ]]; then
+        echo "CPU: 当前使用率 $usage."
+    else
+        echo "CPU: 当前使用率无法读取."
+    fi
+}
+
+ensure_debugfs_mounted() {
+    if command -v mountpoint >/dev/null 2>&1 && mountpoint -q /sys/kernel/debug; then
+        return 0
+    fi
+    awk '$2=="/sys/kernel/debug" && $3=="debugfs" {found=1} END {exit !found}' /proc/mounts 2>/dev/null && return 0
+    command -v sudo >/dev/null 2>&1 || return 1
+    sudo -v || return 1
+    sudo -n mount -t debugfs debugfs /sys/kernel/debug >/dev/null 2>&1
+}
+
+show_npu_summary() {
+    local mode=$1 loading_output frequency_output usage frequency_hz frequency_mhz
+    if [[ "$mode" != yolo ]]; then
+        echo "NPU: 未启用."
+        return 0
+    fi
+
+    ensure_debugfs_mounted || true
+    if command -v sudo >/dev/null 2>&1; then
+        sudo -v || true
+        loading_output=$(sudo -n cat /sys/kernel/debug/viplite/core_loading 2>/dev/null || true)
+        frequency_output=$(sudo -n cat /sys/kernel/debug/viplite/clk_freq 2>/dev/null || true)
+    else
+        loading_output=
+        frequency_output=
+    fi
+    usage=$(printf '%s\n' "$loading_output" |
+        sed -n 's/.*Core0:[[:space:]]*\([0-9][0-9]*\)%.*/\1%/p' | head -n 1)
+    frequency_hz=$(printf '%s\n' "$frequency_output" |
+        sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]]*(Hz).*current freq.*/\1/p' | head -n 1)
+    [[ "$usage" =~ ^[0-9]+%$ ]] || usage=无法读取
+    if [[ "$frequency_hz" =~ ^[0-9]+$ ]]; then
+        frequency_mhz="$(format_grouped_integer "$((frequency_hz / 1000000))") MHz"
+    else
+        frequency_mhz=无法读取
+    fi
+    echo "NPU: 已启用, 当前使用率 $usage, 当前频率 $frequency_mhz."
+}
+
+show_addresses() {
+    local ip
+    ip=$(hostname -I | awk '{print $1}')
+    echo "访问地址: "
+    show_address_urls "$ip"
+    if [[ -r "$RUNTIME_DIR/dashboard.pid" ]]; then
+        echo "看护台: http://$ip:${DASHBOARD_PORT:-8080}"
+    fi
+}
+
+show_address_urls() {
+    local ip=${1:-$(hostname -I | awk '{print $1}')}
+    echo "WebRTC: http://$ip:8889/vision"
+    echo "HLS:    http://$ip:8888/vision"
+    echo "RTSP:   rtsp://$ip:8554/vision"
+}
+
+select_start_mode() {
+    local answer=N
+    if [[ "${VISION_FORCE_MODE:-}" == yolo ]]; then
+        VISION_MODE=yolo
+    else
+        read -r -t 3 -p "是否开启 YOLO26s + ByteTrack？[N/y] " answer || answer=N
+        echo
+        case "$answer" in y|Y) VISION_MODE=yolo ;; *) VISION_MODE=camera ;; esac
+    fi
+    export VISION_MODE
+}
+
+start_vision() {
+    local command file plugin launcher_pid publisher_pgid ip mediamtx_sha256
+    local yolo_enabled audio_enabled
+    if service_fully_running; then
+        show_status
+        return 0
+    fi
+
+    select_start_mode
+
+    if [[ "$VISION_MODE" == camera &&
+          "$VISION_ENCODER" == hardware &&
+          "$VISION_SIZE" == 1920x1080 &&
+          ( "$VISION_ROTATE" == 90 || "$VISION_ROTATE" == 270 ) ]]; then
+        echo "Camera硬编码的1920x1080不支持旋转90或270. 可改用旋转0/180, software编码或YOLO模式." >&2
+        return 1
+    fi
+
+    if module_processes_running || runtime_state_exists; then
+        echo "检测到部分进程或陈旧状态, 正在清理."
+        stop_vision || return 1
+    fi
+    maintain_logs || { echo "启动前日志维护失败." >&2; return 1; }
+
+    for command in media-ctl v4l2-ctl gst-launch-1.0 gst-inspect-1.0 \
+        ffmpeg ffprobe setsid sudo pgrep ps awk sha256sum ldd; do
+        command -v "$command" >/dev/null || { echo "缺少命令: $command" >&2; return 1; }
+    done
+    if ((VISION_FPS != 30)); then
+        for plugin in fdsrc rawvideoparse videorate fdsink; do
+            gst-inspect-1.0 "$plugin" >/dev/null 2>&1 || {
+                echo "缺少 GStreamer 插件: $plugin" >&2; return 1;
+            }
+        done
+    fi
+    if [[ "$VISION_ENCODER" == software ]]; then
+        for plugin in fdsrc rawvideoparse x264enc h264parse fdsink; do
+            gst-inspect-1.0 "$plugin" >/dev/null 2>&1 || {
+                echo "软编码缺少 GStreamer 插件: $plugin" >&2; return 1;
+            }
+        done
+        if [[ "$VISION_MODE" == camera && "$VISION_ROTATE" != 0 ]]; then
+            gst-inspect-1.0 videoflip >/dev/null 2>&1 || {
+                echo "软编码旋转缺少 GStreamer 插件: videoflip" >&2
+                return 1
+            }
+        fi
+    else
+        verify_hardware_encoder || return 1
+    fi
+    [[ -r "$BACKGROUND_MUSIC_FILE" && -s "$BACKGROUND_MUSIC_FILE" ]] || {
+        echo "缺少背景音乐 AAC 文件: $BACKGROUND_MUSIC_FILE" >&2; return 1;
+    }
+    ffprobe -v error -select_streams a:0 \
+        -show_entries stream=codec_name -of csv=p=0 \
+        "$BACKGROUND_MUSIC_FILE" 2>/dev/null | grep -qx 'aac' || {
+        echo "背景音乐必须是可解码的 AAC 音轨: $BACKGROUND_MUSIC_FILE" >&2; return 1;
+    }
+    VISION_AUDIO_ENABLED=yes
+    export VISION_AUDIO_ENABLED
+    for file in "$MEDIAMTX_BIN" "$ISP3A_BIN"; do
+        [[ -x "$file" ]] || { echo "找不到可执行文件: $file" >&2; return 1; }
+    done
+    mediamtx_sha256=$(sha256sum "$MEDIAMTX_BIN" | awk '{print toupper($1)}')
+    [[ "$mediamtx_sha256" == "$EXPECTED_MEDIAMTX_SHA256" ]] || {
+        echo "MediaMTX SHA256 不匹配: $mediamtx_sha256" >&2; return 1;
+    }
+    [[ "$NV12_NORMALIZER_MODE" == bypass || -x "$NV12_NORMALIZER_BIN" ]] || {
+        echo "找不到可执行文件: $NV12_NORMALIZER_BIN" >&2; return 1;
+    }
+    [[ -r "$MEDIAMTX_CONFIG" ]] || { echo "找不到配置: $MEDIAMTX_CONFIG" >&2; return 1; }
+    if [[ "$VISION_MODE" == yolo ]]; then
+        [[ -x "$YOLO_BIN" ]] || { echo "找不到可执行文件: $YOLO_BIN" >&2; return 1; }
+        [[ -r "$MODEL_FILE" ]] || { echo "找不到 YOLO26s 模型: $MODEL_FILE" >&2; return 1; }
+        [[ -r "$VISION_CONFIG" || -r "$LEGACY_TRACKING_CONFIG" ]] || {
+            echo "找不到统一配置: $VISION_CONFIG" >&2; return 1;
+        }
+        ensure_debugfs_mounted || true
+    fi
+
+    if ! (set -e; init_camera_pipeline); then
+        echo "媒体链路初始化失败." >&2
+        stop_vision || true
+        return 1
+    fi
+
+    "$MEDIAMTX_BIN" "$MEDIAMTX_CONFIG" >>"$LOG_DIR/mediamtx.log" 2>&1 &
+    echo $! > "$RUNTIME_DIR/mediamtx.pid"
+    sleep 2
+    pid_file_is_running "$RUNTIME_DIR/mediamtx.pid" "$MEDIAMTX_BIN" || {
+        echo "MediaMTX 启动失败, 请查看 $LOG_DIR/mediamtx.log " >&2; stop_vision || true; return 1;
+    }
+
+    setsid bash -c 'VISION_DIR=$1 VISION_SIZE=$2 VISION_FPS=$3 VISION_MODE=$4 VISION_ENCODER=$5 VISION_ROTATE=$6 VISION_AUDIO_ENABLED=$7 VISION_LLM_ENABLED=$8; export VISION_DIR VISION_SIZE VISION_FPS VISION_MODE VISION_ENCODER VISION_ROTATE VISION_AUDIO_ENABLED VISION_LLM_ENABLED; source "$9"; run_publisher_with_log_maintenance' _ \
+        "$VISION_DIR" "$VISION_SIZE" "$VISION_FPS" "$VISION_MODE" \
+        "$VISION_ENCODER" "$VISION_ROTATE" "$VISION_AUDIO_ENABLED" \
+        "${VISION_LLM_ENABLED:-no}" \
+        "$SCRIPT_DIR/vision-common.sh" \
+        >>"$LOG_DIR/publisher.log" 2>&1 &
+    launcher_pid=$!
+    publisher_pgid=$(ps -o pgid= -p "$launcher_pid" 2>/dev/null | tr -d ' ' || true)
+    [[ "$publisher_pgid" =~ ^[0-9]+$ ]] || publisher_pgid=$launcher_pid
+    printf '%s\n' "$publisher_pgid" > "$PUBLISHER_PGID_FILE"
+    sleep 3
+    publisher_is_running || {
+        echo "视觉推流启动失败, 请查看 $LOG_DIR/publisher.log " >&2
+        stop_vision || true
+        [[ "$VISION_ENCODER" != hardware ]] || show_hardware_fallback_hint
+        return 1
+    }
+
+    setsid "$ISP3A_BIN" --video-id=0 --log-interval=5 >>"$LOG_DIR/isp3a.log" 2>&1 &
+    echo $! > "$RUNTIME_DIR/isp3a.pid"
+    sleep 2
+    pid_file_is_running "$RUNTIME_DIR/isp3a.pid" "$ISP3A_BIN" || {
+        echo "ISP 3A 启动失败, 请查看 $LOG_DIR/isp3a.log " >&2; stop_vision || true; return 1;
+    }
+
+    if [[ "$VISION_MODE" == yolo ]]; then yolo_enabled=yes; else yolo_enabled=no; fi
+    printf 'size=%s\nwidth=%s\nheight=%s\noutput_width=%s\noutput_height=%s\nfps=%s\nbitrate=%s\nmode=%s\nyolo_enabled=%s\nencoder=%s\nrotate=%s\naudio_enabled=%s\n' \
+        "$VISION_SIZE" "$CAPTURE_WIDTH" "$CAPTURE_HEIGHT" \
+        "$OUTPUT_WIDTH" "$OUTPUT_HEIGHT" "$OUTPUT_FPS" \
+        "$VIDEO_BITRATE_BPS" "$VISION_MODE" "$yolo_enabled" \
+        "$VISION_ENCODER" "$VISION_ROTATE" "$VISION_AUDIO_ENABLED" \
+        > "$PROFILE_FILE"
+
+    ip=$(hostname -I | awk '{print $1}')
+    echo "视觉流已启动: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}, ${OUTPUT_FPS} FPS, 模式=${VISION_MODE}, 编码=${VISION_ENCODER}, 旋转=${VISION_ROTATE}°."
+    echo "WebRTC: http://$ip:8889/vision"
+    echo "HLS:    http://$ip:8888/vision"
+    echo "RTSP:   rtsp://$ip:8554/vision"
+}
+
+show_pid_status() {
+    local name=$1 file=$2 expected=$3 pid
+    if pid_file_is_running "$file" "$expected"; then
+        read -r pid < "$file"; echo "$name: 运行中 (PID $pid)"
+    elif [[ -e "$file" ]]; then echo "$name: 未运行 (状态文件无效)"
+    else echo "$name: 未运行"
+    fi
+}
+
+show_mediamtx_details() {
+    local version
+    echo "MediaMTX 项目内路径: $MEDIAMTX_BIN"
+    if [[ -e "$MEDIAMTX_BIN" ]]; then
+        version=$("$MEDIAMTX_BIN" --version 2>&1 | head -n 1 || true)
+        echo "  版本: ${version:-无法读取}"
+        stat -c '  文件: %s bytes, 修改时间=%y' "$MEDIAMTX_BIN" 2>/dev/null || true
+        printf '  SHA256: '; sha256sum "$MEDIAMTX_BIN" 2>/dev/null | awk '{print toupper($1)}'
+    fi
+}
+
+show_bytetrack_metrics() {
+    local metrics="$RUNTIME_DIR/bytetrack-metrics.json"
+    [[ "$(profile_value mode 2>/dev/null || true)" == yolo ]] || return 0
+    echo "ByteTrack 指标: "
+    if [[ -r "$metrics" ]]; then head -n 1 "$metrics"; else echo "  暂无指标."; fi
+}
+
+show_background_music_status() {
+    local loop_status pgid
+    echo -n "背景音乐文件: $BACKGROUND_MUSIC_FILE"
+    if ! background_music_enabled; then
+        echo " (不可用)"
+        echo "背景音乐: 不可用"
+        return
+    fi
+    echo " (可用)"
+    loop_status=未运行
+    if publisher_is_running; then
+        read -r pgid < "$PUBLISHER_PGID_FILE"
+        if pgrep -g "$pgid" -f -- "$BACKGROUND_MUSIC_FILE" >/dev/null 2>&1; then
+            loop_status=循环播放中
+        else
+            loop_status=异常
+        fi
+    fi
+    echo "背景音乐: 预制 AAC, $loop_status"
+}
+
+show_status() {
+    local current_size current_fps current_mode current_encoder current_rotate
+    local current_bitrate current_output running=false
+    if service_fully_running; then
+        running=true
+        current_size=$(profile_value size)
+        current_fps=$(profile_value fps)
+        current_mode=$(profile_value mode)
+        current_encoder=$(profile_value encoder)
+        current_rotate=$(profile_value rotate)
+        current_bitrate=$(profile_value bitrate)
+        current_output="$(profile_value output_width)x$(profile_value output_height)"
+        echo "视觉服务运行中: 模式=$current_mode, 编码=$current_encoder"
+        echo "画面: $current_output, $current_fps FPS, $((current_bitrate / 1000)) Kbps, 旋转 ${current_rotate}°"
+    elif module_processes_running || runtime_state_exists; then
+        current_mode=camera
+        echo "视觉服务运行不完整; 请使用 ./vision --log 查看技术详情."
+    else
+        current_mode=camera
+        echo "视觉服务未运行."
+    fi
+
+    show_background_music_status
+    if [[ "$running" == true && "$current_mode" == yolo ]]; then
+        show_bytetrack_metrics
+    fi
+    echo
+    show_temperatures
+    echo
+    show_cpu_usage
+    echo
+    show_cpu_frequencies
+    echo
+    show_npu_summary "$current_mode"
+    echo
+    show_addresses
+    echo
+    if [[ "$running" == true ]]; then
+        echo "使用 ./vision --help 查看帮助; 使用 ./vision --stop 停止服务."
+    else
+        echo "使用 ./vision --help 查看帮助; 使用 ./vision --start 启动服务."
+    fi
+}
+
+show_publisher_process_status() {
+    local pgid
+    if publisher_is_running; then
+        read -r pgid < "$PUBLISHER_PGID_FILE"
+        echo "视觉推流: 运行中 (进程组 $pgid)"
+    elif [[ -e "$PUBLISHER_PGID_FILE" ]]; then
+        echo "视觉推流: 未运行 (状态文件无效)"
+    else
+        echo "视觉推流: 未运行"
+    fi
+}
+
+show_log() {
+    local log found=false
+    show_pid_status "MediaMTX" "$RUNTIME_DIR/mediamtx.pid" "$MEDIAMTX_BIN"
+    show_mediamtx_details
+    show_publisher_process_status
+    show_pid_status "ISP 3A" "$RUNTIME_DIR/isp3a.pid" "$ISP3A_BIN"
+    echo
+    echo "最近日志: "
+    for log in publisher.log isp3a.log mediamtx.log llm_bridge.log dashboard.log; do
+        [[ -r "$LOG_DIR/$log" ]] || continue
+        found=true
+        printf '\n[%s]\n' "$log"
+        tail -n 8 "$LOG_DIR/$log"
+    done
+    [[ "$found" == true ]] || echo "暂无日志."
+}
+
+case "$action" in
+    --start) start_vision ;;
+    --status) show_status ;;
+    --log) show_log ;;
+    --stop) stop_vision ;;
+esac

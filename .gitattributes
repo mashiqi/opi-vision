@@ -1,0 +1,17 @@
+# 默认文本使用 LF
+* text=auto eol=lf
+*.sh text eol=lf
+vision text eol=lf
+vision-withyolo text eol=lf
+/docs/个人总结.txt text eol=crlf
+
+# 发布资产和归档不做换行转换
+/bin/* binary
+*.so binary
+*.nb binary
+*.mp3 binary
+*.m4a binary
+*.pdf binary
+*.gz binary
+*.tar binary
+*.sha256 binary

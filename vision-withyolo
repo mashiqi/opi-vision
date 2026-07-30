@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -u
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+show_help() {
+    cat <<'EOF'
+用法:
+  ./vision-withyolo [--size 640x360|1280x720|1920x1080] [--fps 1-30]
+                    [--encoder hardware|software]
+                    [--rotate 0|90|180|270]
+  ./vision-withyolo --help
+
+启动选项:
+  --size 640x360|1280x720|1920x1080
+      设置画面尺寸. 默认: 1280x720.
+  --fps 1-30
+      设置整数帧率. 默认: 30.
+  --encoder hardware|software
+      hardware使用Cedarc/VE2硬编码, software使用CPU x264enc.
+      默认: hardware.
+  --rotate 0|90|180|270
+      按顺时针方向旋转画面. 默认: 180. 当前不提供镜像功能.
+
+管理命令:
+  ./vision --status  显示运行摘要和系统状态.
+  ./vision --log     显示进程详情和最近日志.
+  ./vision --stop    停止视觉服务.
+  --help             显示帮助信息.
+
+说明:
+  直接启动YOLO26s + ByteTrack模式.
+  视频码率按尺寸自动选择: 360p为1 Mbps, 720p为2.5 Mbps, 1080p为4 Mbps.
+  硬编码启动失败时不会静默回退. 可显式使用--encoder software.
+  运行中不能切换参数或模式. 请先执行./vision --stop.
+EOF
+}
+
+args=()
+size_seen=false
+fps_seen=false
+encoder_seen=false
+rotate_seen=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help) [[ $# -eq 1 ]] || { echo "错误: --help 不能与其他参数同时使用. " >&2; exit 2; }; show_help; exit 0 ;;
+        --size)
+            [[ "$size_seen" == false ]] || { echo "错误: --size 不可重复." >&2; exit 2; }
+            [[ $# -ge 2 && "$2" != --* ]] || { echo "错误: --size 后缺少尺寸. " >&2; exit 2; }
+            case "$2" in 640x360|1280x720|1920x1080) ;; *) echo "错误: 非法尺寸: $2" >&2; exit 2 ;; esac
+            size_seen=true; args+=(--size "$2"); shift 2
+            ;;
+        --fps)
+            [[ "$fps_seen" == false ]] || { echo "错误: --fps 不可重复." >&2; exit 2; }
+            [[ $# -ge 2 && "$2" != --* ]] || { echo "错误: --fps 后缺少帧率." >&2; exit 2; }
+            [[ "$2" =~ ^([1-9]|[12][0-9]|30)$ ]] || {
+                echo "错误: 非法帧率: $2 (必须是 1～30 的整数)" >&2
+                exit 2
+            }
+            fps_seen=true; args+=(--fps "$2"); shift 2
+            ;;
+        --encoder)
+            [[ "$encoder_seen" == false ]] || { echo "错误: --encoder 不可重复." >&2; exit 2; }
+            [[ $# -ge 2 && "$2" != --* ]] || { echo "错误: --encoder 后缺少编码方式." >&2; exit 2; }
+            case "$2" in hardware|software) ;; *) echo "错误: 编码方式必须是 hardware 或 software." >&2; exit 2 ;; esac
+            encoder_seen=true; args+=(--encoder "$2"); shift 2
+            ;;
+        --rotate)
+            [[ "$rotate_seen" == false ]] || { echo "错误: --rotate 不可重复." >&2; exit 2; }
+            [[ $# -ge 2 && "$2" != --* ]] || { echo "错误: --rotate 后缺少角度." >&2; exit 2; }
+            case "$2" in 0|90|180|270) ;; *) echo "错误: 旋转角度必须是 0、90、180 或 270." >&2; exit 2 ;; esac
+            rotate_seen=true; args+=(--rotate "$2"); shift 2
+            ;;
+        *) echo "错误: 未知参数: $1" >&2; show_help >&2; exit 2 ;;
+    esac
+done
+
+VISION_FORCE_MODE=yolo exec "$SCRIPT_DIR/vision" --start "${args[@]}"

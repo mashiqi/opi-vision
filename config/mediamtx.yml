@@ -1,0 +1,23 @@
+logLevel: info
+
+srt: false
+rtmp: false
+moq: false
+
+rtsp: true
+rtspAddress: :8554
+
+hls: true
+hlsAddress: :8888
+hlsAlwaysRemux: true
+hlsVariant: mpegts
+hlsSegmentCount: 7
+hlsSegmentDuration: 2s
+
+webrtc: true
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+
+paths:
+  vision:
+    source: udp+mpegts://127.0.0.1:8891

@@ -1,0 +1,34 @@
+# 运行状态与日志
+/run/
+/log/
+*.log
+*.pid
+*.jsonl
+
+# 本地密钥与运行配置（示例配置保留）
+/config/vision.env
+/config/*.pem
+/config/*.key
+/certs/
+
+# 构建产物与缓存
+/src/**/build/
+/src/**/CMakeFiles/
+/src/**/CMakeCache.txt
+/src/**/cmake_install.cmake
+/src/**/*.o
+/src/**/*.a
+/src/src-llm/__pycache__/
+__pycache__/
+*.py[cod]
+
+# 临时部署文件与编辑器文件
+/bin/*.new
+/bin/*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
