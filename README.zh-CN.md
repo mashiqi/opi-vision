@@ -1,90 +1,102 @@
 # OrangePi Vision
 
-**面向 OrangePi ZERO 3W 与 IMX219 的一体化边缘视觉服务。** 本项目将相机采集、YOLO26s + ByteTrack 追踪、A733 硬件加速和多协议直播整理为可部署的 ARM64 仓库。
+<p align="center">
+  <img src="docs/images/banner.png" alt="OrangePi Vision 边缘视觉服务" width="720">
+</p>
 
-[快速开始](#快速开始) · [系统架构](#系统架构) · [文档](#文档) · [English](README.md)
+<p align="center">
+  <strong>面向 OrangePi ZERO 3W 与 IMX219 的边缘视觉服务。</strong><br>
+  硬件编码 · 局域网 WebRTC · 加密 SRT · 可选 AI 检测
+</p>
 
-## 功能亮点
+<p align="center">
+  <a href="https://github.com/ma-shiqi/opi-vision"><img src="https://img.shields.io/badge/platform-ARM64%20%7C%20OrangePi%20ZERO%203W-orange" alt="Platform"></a>
+  <a href="#访问方式"><img src="https://img.shields.io/badge/protocols-RTSP%20%7C%20WebRTC%20%7C%20SRT-1c94b5" alt="Protocols"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20%7C%20MPL--2.0-blue" alt="License"></a>
+</p>
 
-- **双模式运行：** 轻量 Camera 直播，或 YOLO26s + ByteTrack 实时检测与追踪。
-- **A733 硬件加速：** 使用 NPU 推理，默认采用 Cedarc/VE2 H.264 硬件编码。
-- **一次输入，三种输出：** 同一份编码输入提供 RTSP、HLS 和 WebRTC；不会因不同协议重复视频编码。
-- **部署资产齐全：** 仓库包含 ARM64 程序、NPU 模型、背景音频、Cedarc 运行时材料和硬件 PDF。
-- **画面参数可调：** 支持 640×360、1280×720、1920×1080，1–30 FPS，以及 0°/90°/180°/270° 旋转。
-
-## 快速开始
-
-准备 OrangePi ZERO 3W（A733/ARM64）、已可用的 IMX219 驱动，并将仓库放在 `~/orangepi-vision`：
-
-```bash
-cd ~/orangepi-vision
-chmod +x vision vision-withyolo bin/* src/src-camera/build-board-tools.sh
-./src/src-camera/build-board-tools.sh   # 仅首次部署需要
-./vision --start                         # Camera 模式
-```
-
-使用 `./vision-withyolo --size 1280x720 --fps 20` 启动检测与追踪；使用 `./vision --status`、`./vision --log`、`./vision --stop` 查看或管理服务。硬件编码不会静默降级；需要时请显式指定 `--encoder software`。
-
-## 访问与使用
-
-| 协议 | 地址 | 常用场景 |
-|---|---|---|
-| WebRTC | `http://<board-ip>:8889/vision` | 浏览器低延迟预览 |
-| HLS | `http://<board-ip>:8888/vision` | 浏览器与播放器兼容访问 |
-| RTSP | `rtsp://<board-ip>:8554/vision` | VLC、NVR 与 RTSP 客户端 |
-
-```bash
-./vision --start --size 1280x720 --fps 20 --encoder hardware --rotate 180
-./vision --start --encoder software
-```
-
-改变模式、分辨率、帧率、编码器或旋转角度前，应先停止服务。
+<p align="center">
+  <a href="#快速开始">快速开始</a> · <a href="#系统架构">系统架构</a> · <a href="#访问方式">访问方式</a> · <a href="#更新记录">更新记录</a> · <a href="README.md">English</a>
+</p>
 
 ## 系统架构
 
 ```text
-IMX219 → ISP/VIN（NV12）→ Camera 或 YOLO26s + ByteTrack → H.264 + AAC → MediaMTX
-                                                                       ├─ RTSP
-                                                                       ├─ HLS → FRP → Nginx HTTPS → 浏览器
-                                                                       └─ WebRTC
+IMX219 → NV12 → H.264 + Opus (MPEG-TS)
+                 ├─ 本地 MediaMTX → RTSP / WebRTC
+                 └─ 加密 SRT → 云端 MediaMTX → WebRTC
 ```
 
-HLS 使用 MPEG-TS、2 秒分片并保留 7 个分片，以连续播放为优先。
+默认使用 Camera 模式；YOLO 模式可在编码前插入 YOLO26s 与 ByteTrack。运行期音频为 `config/stream.opus`（48 kHz、双声道）；板端 HLS 已关闭。
+
+## 快速开始
+
+```bash
+cd ~/orangepi-vision
+chmod +x vision vision-withyolo bin/* src/src-camera/build-board-tools.sh
+./src/src-camera/build-board-tools.sh  # 仅首次部署需要
+./vision --start
+```
+
+```bash
+./vision --start --size 1280x720 --fps 20
+./vision-withyolo --size 1280x720 --fps 20
+./vision --status
+./vision --log
+./vision --stop
+```
+
+<p align="center">
+  <img src="docs/images/camera-demo.png" alt="通过 WebRTC 播放器查看的实时相机画面" width="720">
+</p>
+
+<p align="center"><em>通过 WebRTC 播放器查看的实时相机画面。</em></p>
+
+更换模式、分辨率、帧率、编码器或旋转角度前，请先停止服务。
+
+## 访问方式
+
+| 协议 | 地址 | 用途 |
+|---|---|---|
+| WebRTC | `http://&lt;板卡IP&gt;:8889/vision` | 局域网低延迟预览 |
+| RTSP | `rtsp://&lt;板卡IP&gt;:8554/vision` | VLC、NVR、RTSP 客户端 |
+| 公网 WebRTC | `https://&lt;你的域名&gt;/vision/` | 云端部署 |
 
 ## 配置
-
-仅在需要 Dashboard 或 LLM 事件功能时创建本地配置：
 
 ```bash
 cp config/vision.env.example config/vision.env
 ```
 
-请将密钥保存在 `config/vision.env`，该文件已被 Git 忽略。运行时音频为 `config/stream.m4a`（AAC-LC、48 kHz、双声道）；替换音频前请保留源文件 `stream.mp3` 并确认再分发权。
+填写五项 `VISION_SRT_*` 配置后启用云端转发；五项均留空则只使用本地推流。请勿提交 `config/vision.env`。
 
-## 项目结构
+云端配置模板为 [`config/mediamtx.yml.ToBeUploadToOnlineServer.example`](config/mediamtx.yml.ToBeUploadToOnlineServer.example) 和 [`config/nginx.conf.ToBeUploadToOnlineServer.example`](config/nginx.conf.ToBeUploadToOnlineServer.example)。将它们复制为对应的真实部署文件，替换占位符后再用于服务器；真实配置必须保持私有。
 
-```text
-bin/          ARM64 MediaMTX、YOLO 和编码工具
-config/       推流配置、示例环境变量和音频
-docs/         硬件 PDF 与公网 HLS 部署指南
-lib/          A733 NPU 运行库
-src/          camera、Cedarc、LLM 与 YOLO26 源码
-yolo-models/  A733 NPU 模型
-vision*       服务控制入口
-```
+## 更新记录
+
+### V2 — 本地与云端 WebRTC
+
+- H.264 + Opus 一次合流后由本地 MediaMTX 提供局域网流。
+- 通过加密 SRT 转发至云端 MediaMTX，供公网 WebRTC 播放。
+- Nginx 提供 `/vision/` 播放页并反代 WHEP；默认不启用观看登录。
+- FRP 与板端 HLS 作为已关闭的旧回退方案保留。
+
+### V1 — HLS 部署
+
+- 板端 HLS 通过 FRP、Nginx 与 HTTPS 对外提供。
+- 该链路已由 V2 WebRTC 替代，仅保留作旧方案参考。
 
 ## 文档
 
-- [公网 HLS、FRP、Nginx 与 HTTPS](docs/VISION_FRP_NGINX_HTTPS部署指南.md)
+- [V2 WebRTC 部署与验收](docs/V2_WebRTC部署与验收.md)
+- [SRT 公网部署方案](docs/SRT公网部署方案.md)
+- [运行交接记录](docs/HANDOFF.md)
+- [FRP + HLS 旧方案](docs/VISION_FRP_NGINX_HTTPS部署指南.md)
 - [YOLO26 交叉编译与板端部署](src/src-yolo26/README.md)
 - [Cedarc 运行时与硬件编码](src/src-cedarc/vendor/CEDARC_HARDWARE_ENCODING.md)
-- [模型说明](yolo-models/README.md) · [运维交接](HANDOFF.md)
 
-Camera 工具在板端执行 `./src/src-camera/build-board-tools.sh` 构建。YOLO26 需要在 x86_64 Ubuntu 的 Allwinner Model Zoo 环境中使用 `../build_linux.sh -t a733 -s debian11` 交叉编译；完整步骤见 YOLO 文档。
+## 发布安全
 
-## 贡献与许可证
+请勿提交真实云端配置、`config/vision.env`、证书、私钥、日志或运行状态文件；共享部署配置时仅提交 `.example` 模板。
 
-欢迎提交 Issue 和 Pull Request。请勿提交 `config/vision.env`、证书、日志或运行文件；修改第三方或媒体资产时，请同步更新 [LICENCES](LICENCES)。
-
-这是一个自包含部署仓库，因此 MediaMTX、ARM64 程序、NPU 模型、音频和硬件 PDF 等大文件会被保留。项目、第三方、字体与媒体声明统一收录在 [LICENCES](LICENCES)，不另设 `LICENSE` 文件。
-
+许可证信息见 [LICENSE](LICENSE)。

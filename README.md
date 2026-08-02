@@ -1,89 +1,102 @@
 # OrangePi Vision
 
-**An all-in-one edge-vision service for OrangePi ZERO 3W and IMX219.** It combines camera capture, YOLO26s + ByteTrack tracking, A733 hardware acceleration, and multi-protocol streaming in a deployment-ready ARM64 repository.
+<p align="center">
+  <img src="docs/images/banner.png" alt="OrangePi Vision edge vision service" width="720">
+</p>
 
-[Quick start](#quick-start) · [Architecture](#architecture) · [Documentation](#documentation) · [中文介绍](README.zh-CN.md)
+<p align="center">
+  <strong>An edge-vision service for OrangePi ZERO 3W and IMX219.</strong><br>
+  Hardware encoding · Local WebRTC · Encrypted SRT · Optional AI detection
+</p>
 
-## Highlights
+<p align="center">
+  <a href="https://github.com/ma-shiqi/opi-vision"><img src="https://img.shields.io/badge/platform-ARM64%20%7C%20OrangePi%20ZERO%203W-orange" alt="Platform"></a>
+  <a href="#access"><img src="https://img.shields.io/badge/protocols-RTSP%20%7C%20WebRTC%20%7C%20SRT-1c94b5" alt="Protocols"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20%7C%20MPL--2.0-blue" alt="License"></a>
+</p>
 
-- **Two modes:** lightweight Camera streaming or YOLO26s + ByteTrack real-time detection and tracking.
-- **A733 acceleration:** NPU inference with Cedarc/VE2 H.264 hardware encoding by default.
-- **One input, three outputs:** RTSP, HLS, and WebRTC are served from the same encoded input; protocols do not trigger duplicate video encoding.
-- **Deployment-ready assets:** ARM64 binaries, the NPU model, audio, Cedarc runtime material, and hardware PDFs are included.
-- **Configurable video:** 640×360, 1280×720, or 1920×1080; 1–30 FPS; 0°/90°/180°/270° rotation.
-
-## Quick start
-
-Use an OrangePi ZERO 3W (A733/ARM64) with a working IMX219 camera driver, then place this repository at `~/orangepi-vision`:
-
-```bash
-cd ~/orangepi-vision
-chmod +x vision vision-withyolo bin/* src/src-camera/build-board-tools.sh
-./src/src-camera/build-board-tools.sh   # first deployment only
-./vision --start                         # Camera mode
-```
-
-Start detection and tracking with `./vision-withyolo --size 1280x720 --fps 20`. Inspect or stop the service with `./vision --status`, `./vision --log`, and `./vision --stop`. Hardware encoding never silently falls back; select `--encoder software` explicitly when needed.
-
-## Access and usage
-
-| Protocol | Endpoint | Typical use |
-|---|---|---|
-| WebRTC | `http://<board-ip>:8889/vision` | Low-latency browser preview |
-| HLS | `http://<board-ip>:8888/vision` | Broad browser/player compatibility |
-| RTSP | `rtsp://<board-ip>:8554/vision` | VLC, NVR, and RTSP clients |
-
-```bash
-./vision --start --size 1280x720 --fps 20 --encoder hardware --rotate 180
-./vision --start --encoder software
-```
-
-Stop the service before changing its mode, resolution, frame rate, encoder, or rotation.
+<p align="center">
+  <a href="#quick-start">Quick start</a> · <a href="#architecture">Architecture</a> · <a href="#access">Access</a> · <a href="#changelog">Changelog</a> · <a href="README.zh-CN.md">中文</a>
+</p>
 
 ## Architecture
 
 ```text
-IMX219 → ISP/VIN (NV12) → Camera or YOLO26s + ByteTrack → H.264 + AAC → MediaMTX
-                                                                  ├─ RTSP
-                                                                  ├─ HLS → FRP → Nginx HTTPS → Browser
-                                                                  └─ WebRTC
+IMX219 → NV12 → H.264 + Opus (MPEG-TS)
+                 ├─ Local MediaMTX → RTSP / WebRTC
+                 └─ Encrypted SRT → Cloud MediaMTX → WebRTC
 ```
 
-HLS uses MPEG-TS with 2-second segments and retains seven segments to prioritize stable playback.
+Camera mode is the default. YOLO mode optionally inserts YOLO26s and ByteTrack before encoding. Audio is `config/stream.opus` (48 kHz stereo); board-side HLS is disabled.
+
+## Quick start
+
+```bash
+cd ~/orangepi-vision
+chmod +x vision vision-withyolo bin/* src/src-camera/build-board-tools.sh
+./src/src-camera/build-board-tools.sh  # first deployment only
+./vision --start
+```
+
+```bash
+./vision --start --size 1280x720 --fps 20
+./vision-withyolo --size 1280x720 --fps 20
+./vision --status
+./vision --log
+./vision --stop
+```
+
+<p align="center">
+  <img src="docs/images/camera-demo.png" alt="Live camera view through the WebRTC player" width="720">
+</p>
+
+<p align="center"><em>Live camera view through the WebRTC player.</em></p>
+
+Stop the service before changing mode, resolution, frame rate, encoder, or rotation.
+
+## Access
+
+| Protocol | Endpoint | Use |
+|---|---|---|
+| WebRTC | `http://&lt;board-ip&gt;:8889/vision` | Low-latency LAN preview |
+| RTSP | `rtsp://&lt;board-ip&gt;:8554/vision` | VLC, NVR, and RTSP clients |
+| Public WebRTC | `https://&lt;your-domain&gt;/vision/` | Cloud deployment |
 
 ## Configuration
-
-Create local configuration only when Dashboard or LLM event features are required:
 
 ```bash
 cp config/vision.env.example config/vision.env
 ```
 
-Keep keys in `config/vision.env`; it is intentionally ignored by Git. Runtime audio is `config/stream.m4a` (AAC-LC, 48 kHz, stereo); retain the source `stream.mp3` and confirm redistribution rights before replacing either file.
+Set the five `VISION_SRT_*` values together to enable cloud forwarding. Leave all five blank to use local streaming only. Never commit `config/vision.env`.
 
-## Repository layout
+Cloud deployment templates are [`config/mediamtx.yml.ToBeUploadToOnlineServer.example`](config/mediamtx.yml.ToBeUploadToOnlineServer.example) and [`config/nginx.conf.ToBeUploadToOnlineServer.example`](config/nginx.conf.ToBeUploadToOnlineServer.example). Copy each to the corresponding real deployment filename, replace placeholders, and keep the resulting real configuration private.
 
-```text
-bin/          ARM64 MediaMTX, YOLO, and encoding tools
-config/       stream configuration, sample environment, and audio
-docs/         hardware PDFs and public-HLS deployment guide
-lib/          A733 NPU runtime libraries
-src/          camera, Cedarc, LLM, and YOLO26 source
-yolo-models/  A733 NPU model
-vision*       service control entry points
-```
+## Changelog
+
+### V2 — WebRTC local and cloud deployment
+
+- H.264 + Opus is published once, then served locally through MediaMTX.
+- Encrypted SRT forwards the stream to cloud MediaMTX for public WebRTC playback.
+- Nginx serves `/vision/` and proxies WHEP; viewer authentication is disabled by default.
+- FRP and board-side HLS are retained only as a disabled legacy fallback.
+
+### V1 — HLS deployment
+
+- Board-side HLS was exposed through FRP, Nginx, and HTTPS.
+- This path is superseded by V2 WebRTC and is documented only as a legacy fallback.
 
 ## Documentation
 
-- [Public HLS with FRP, Nginx, and HTTPS](docs/VISION_FRP_NGINX_HTTPS%E9%83%A8%E7%BD%B2%E6%8C%87%E5%8D%97.md)
+- [V2 WebRTC deployment and acceptance record](docs/V2_WebRTC部署与验收.md)
+- [SRT public deployment guide](docs/SRT公网部署方案.md)
+- [Operations handoff](docs/HANDOFF.md)
+- [Legacy FRP + HLS guide](docs/VISION_FRP_NGINX_HTTPS部署指南.md)
 - [YOLO26 cross-compilation and board deployment](src/src-yolo26/README.md)
 - [Cedarc runtime and hardware encoding](src/src-cedarc/vendor/CEDARC_HARDWARE_ENCODING.md)
-- [Model notes](yolo-models/README.md) · [Operations handoff](HANDOFF.md)
 
-Camera tools build on the board with `./src/src-camera/build-board-tools.sh`. YOLO26 cross-compiles on x86_64 Ubuntu in the Allwinner Model Zoo environment with `../build_linux.sh -t a733 -s debian11`; see the YOLO guide for the complete procedure.
+## Release safety
 
-## Contributing and license
+Do not commit real cloud configuration, `config/vision.env`, certificates, private keys, logs, or runtime files. Use only the checked-in `.example` templates when sharing deployment configuration.
 
-Issues and pull requests are welcome. Do not commit `config/vision.env`, certificates, logs, or runtime files; preserve deployment assets and update [LICENCES](LICENCES) when changing third-party or media assets.
-
-This is a self-contained deployment repository, so MediaMTX, ARM64 binaries, the NPU model, audio, and hardware PDFs are intentionally large. Project, third-party, font, and media notices are consolidated in [LICENCES](LICENCES); there is no separate `LICENSE` file.
+See [LICENSE](LICENSE) for licensing information.

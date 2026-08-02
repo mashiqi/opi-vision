@@ -151,6 +151,7 @@ export VISION_DIR VISION_SIZE=$vision_size VISION_FPS=$vision_fps \
     VISION_ROTATE=$vision_rotate VISION_AUDIO_ENABLED=$vision_audio_enabled
 # shellcheck source=vision-common.sh
 source "$SCRIPT_DIR/vision-common.sh"
+load_vision_config
 
 PUBLISHER_PGID_FILE="$RUNTIME_DIR/publisher.pgid"
 STOP_INT_TRIES=${STOP_INT_TRIES:-20}
@@ -498,8 +499,15 @@ show_addresses() {
 show_address_urls() {
     local ip=${1:-$(hostname -I | awk '{print $1}')}
     echo "WebRTC: http://$ip:8889/vision"
-    echo "HLS:    http://$ip:8888/vision"
     echo "RTSP:   rtsp://$ip:8554/vision"
+}
+
+show_srt_status() {
+    if srt_is_configured; then
+        echo "SRT 公网转发: 已启用（由推流进程转发）"
+    else
+        echo "SRT 公网转发: 未配置"
+    fi
 }
 
 select_start_mode() {
@@ -537,6 +545,7 @@ start_vision() {
         stop_vision || return 1
     fi
     maintain_logs || { echo "启动前日志维护失败." >&2; return 1; }
+    validate_srt_config || return 1
 
     for command in media-ctl v4l2-ctl gst-launch-1.0 gst-inspect-1.0 \
         ffmpeg ffprobe setsid sudo pgrep ps awk sha256sum ldd; do
@@ -565,12 +574,16 @@ start_vision() {
         verify_hardware_encoder || return 1
     fi
     [[ -r "$BACKGROUND_MUSIC_FILE" && -s "$BACKGROUND_MUSIC_FILE" ]] || {
-        echo "缺少背景音乐 AAC 文件: $BACKGROUND_MUSIC_FILE" >&2; return 1;
+        echo "缺少背景音乐 Opus 文件: $BACKGROUND_MUSIC_FILE" >&2; return 1;
     }
     ffprobe -v error -select_streams a:0 \
         -show_entries stream=codec_name -of csv=p=0 \
-        "$BACKGROUND_MUSIC_FILE" 2>/dev/null | grep -qx 'aac' || {
-        echo "背景音乐必须是可解码的 AAC 音轨: $BACKGROUND_MUSIC_FILE" >&2; return 1;
+        "$BACKGROUND_MUSIC_FILE" 2>/dev/null | grep -qx 'opus' || {
+        echo "背景音乐必须是可解码的 Opus 音轨: $BACKGROUND_MUSIC_FILE" >&2; return 1;
+    }
+    ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels \
+        -of csv=p=0 "$BACKGROUND_MUSIC_FILE" 2>/dev/null | grep -qx '48000,2' || {
+        echo "背景音乐必须为 48 kHz 双声道 Opus: $BACKGROUND_MUSIC_FILE" >&2; return 1;
     }
     VISION_AUDIO_ENABLED=yes
     export VISION_AUDIO_ENABLED
@@ -643,8 +656,8 @@ start_vision() {
     ip=$(hostname -I | awk '{print $1}')
     echo "视觉流已启动: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}, ${OUTPUT_FPS} FPS, 模式=${VISION_MODE}, 编码=${VISION_ENCODER}, 旋转=${VISION_ROTATE}°."
     echo "WebRTC: http://$ip:8889/vision"
-    echo "HLS:    http://$ip:8888/vision"
     echo "RTSP:   rtsp://$ip:8554/vision"
+    show_srt_status
 }
 
 show_pid_status() {
@@ -692,7 +705,7 @@ show_background_music_status() {
             loop_status=异常
         fi
     fi
-    echo "背景音乐: 预制 AAC, $loop_status"
+    echo "背景音乐: 预制 Opus, $loop_status"
 }
 
 show_status() {
@@ -729,6 +742,8 @@ show_status() {
     show_cpu_frequencies
     echo
     show_npu_summary "$current_mode"
+    echo
+    show_srt_status
     echo
     show_addresses
     echo

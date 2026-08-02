@@ -1,5 +1,7 @@
 # 香橙派 HLS 通过 FRP、Nginx 和 HTTPS 公网访问
 
+> **旧方案提示（2026-08-01）**：V2 已切换至 SRT → 云端 MediaMTX → WebRTC，`frpc` 和 `frps` 当前已关闭但未卸载，板端 HLS 也已关闭。本文件仅保留作 HLS 回退与 FRP 运维参考；当前公网播放请使用 `/vision/`，详见 [V2 WebRTC 部署与验收](V2_WebRTC部署与验收.md)。
+
 本文说明如何在香橙派执行：
 
 ```bash

@@ -1,0 +1,32 @@
+# Cloud MediaMTX: encrypted SRT ingest and public WebRTC egress.
+logLevel: info
+rtsp: false
+rtmp: false
+hls: false
+moq: false
+api: false
+
+srt: true
+srtAddress: :8890
+
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+webrtcLocalUDPAddress: :8189
+webrtcAdditionalHosts: [example.com]
+
+authMethod: internal
+authInternalUsers:
+  - user: replace_with_publish_user
+    pass: replace_with_publish_password
+    permissions:
+      - action: publish
+        path: vision
+  - user: any
+    pass:
+    permissions:
+      - action: read
+        path: vision
+
+paths:
+  vision:
+    srtPublishPassphrase: replace_with_srt_aes_passphrase

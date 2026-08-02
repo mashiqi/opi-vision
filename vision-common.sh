@@ -6,7 +6,7 @@ LOG_DIR="$VISION_DIR/log"
 BIN_DIR="$VISION_DIR/bin"
 CONFIG_DIR="$VISION_DIR/config"
 # 原始下载地址: https://pixabay.com/sound-effects/nature-tranquil-stream-387678/
-BACKGROUND_MUSIC_FILE="$CONFIG_DIR/stream.m4a"
+BACKGROUND_MUSIC_FILE="$CONFIG_DIR/stream.opus"
 MEDIAMTX_BIN="$BIN_DIR/mediamtx"
 MEDIAMTX_CONFIG="$CONFIG_DIR/mediamtx.yml"
 EXPECTED_MEDIAMTX_SHA256=5BDAF5BA8BCB8E2A502F5CF96EE8BAF39D11CFC257F12EBAC304F4B0307C7C92
@@ -46,6 +46,11 @@ VISION_MODE="${VISION_MODE:-camera}"
 VISION_ENCODER="${VISION_ENCODER:-hardware}"
 VISION_ROTATE="${VISION_ROTATE:-180}"
 VISION_AUDIO_ENABLED="${VISION_AUDIO_ENABLED:-auto}"
+VISION_SRT_CLOUD_HOST="${VISION_SRT_CLOUD_HOST:-}"
+VISION_SRT_PASSPHRASE="${VISION_SRT_PASSPHRASE:-}"
+VISION_SRT_USERNAME="${VISION_SRT_USERNAME:-}"
+VISION_SRT_PASSWORD="${VISION_SRT_PASSWORD:-}"
+VISION_SRT_LATENCY_MS="${VISION_SRT_LATENCY_MS:-}"
 case "$VISION_SIZE" in
     640x360) CAPTURE_WIDTH=640; CAPTURE_HEIGHT=360; VIN_FRAME_BYTES=353280; VIDEO_BITRATE_BPS=1000000 ;;
     1280x720) CAPTURE_WIDTH=1280; CAPTURE_HEIGHT=720; VIN_FRAME_BYTES=1382400; VIDEO_BITRATE_BPS=2500000 ;;
@@ -152,6 +157,54 @@ background_music_enabled() {
        -r "$BACKGROUND_MUSIC_FILE" && -s "$BACKGROUND_MUSIC_FILE" ]]
 }
 
+load_vision_config() {
+    if [[ -r "$VISION_CONFIG" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        source "$VISION_CONFIG"
+        set +a
+        return 0
+    fi
+
+    # Temporary migration support. Remove after all boards use vision.env.
+    if [[ -r "$LEGACY_TRACKING_CONFIG" || -r "$LEGACY_LLM_CONFIG" ]]; then
+        echo "未找到 config/vision.env，使用旧配置；请迁移到统一配置。" >&2
+        set -a
+        [[ ! -r "$LEGACY_TRACKING_CONFIG" ]] || source "$LEGACY_TRACKING_CONFIG"
+        [[ ! -r "$LEGACY_LLM_CONFIG" ]] || source "$LEGACY_LLM_CONFIG"
+        set +a
+        [[ -z "${LLM_API_KEY:-}" ]] || VISION_LLM_ENABLED=yes
+    fi
+}
+
+srt_is_configured() {
+    [[ -n "$VISION_SRT_CLOUD_HOST" && -n "$VISION_SRT_PASSPHRASE" &&
+       -n "$VISION_SRT_USERNAME" && -n "$VISION_SRT_PASSWORD" &&
+       -n "$VISION_SRT_LATENCY_MS" ]]
+}
+
+validate_srt_config() {
+    local value
+    if ! srt_is_configured; then
+        if [[ -n "$VISION_SRT_CLOUD_HOST$VISION_SRT_PASSPHRASE$VISION_SRT_USERNAME$VISION_SRT_PASSWORD$VISION_SRT_LATENCY_MS" ]]; then
+            echo "SRT 配置必须同时填写云端主机、AES 密码、用户名、密码和延迟。" >&2
+            return 1
+        fi
+        return 0
+    fi
+    [[ "$VISION_SRT_CLOUD_HOST" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || {
+        echo "SRT 云端主机仅允许域名或 IPv4 地址。" >&2; return 1;
+    }
+    [[ "$VISION_SRT_LATENCY_MS" =~ ^[1-9][0-9]*$ ]] || {
+        echo "SRT 延迟必须是正整数毫秒。" >&2; return 1;
+    }
+    for value in "$VISION_SRT_PASSPHRASE" "$VISION_SRT_USERNAME" "$VISION_SRT_PASSWORD"; do
+        [[ "$value" =~ ^[A-Za-z0-9_-]{16,32}$ ]] || {
+            echo "SRT 密码和用户名必须为 16–32 位字母、数字、_ 或 -。" >&2; return 1;
+        }
+    done
+}
+
 select_output_fps() {
     if ((OUTPUT_FPS == 30)); then
         cat
@@ -211,21 +264,28 @@ mux_h264_stream() {
     else
         timing_filter="setts=pts=N*DURATION:dts=N*DURATION:duration=DURATION"
     fi
+    local output_options local_output srt_output
+    local_output="[f=mpegts:onfail=ignore]udp://127.0.0.1:$UDP_PORT?pkt_size=1316"
+    if srt_is_configured; then
+        srt_output="[f=fifo:fifo_format=mpegts:onfail=ignore:queue_size=512:attempt_recovery=1:recover_any_error=1:recovery_wait_time=5:drop_pkts_on_overflow=1:restart_with_keyframe=1]srt://${VISION_SRT_CLOUD_HOST}:8890?mode=caller&latency=${VISION_SRT_LATENCY_MS}&passphrase=${VISION_SRT_PASSPHRASE}&pbkeylen=16&streamid=publish:vision:${VISION_SRT_USERNAME}:${VISION_SRT_PASSWORD}"
+        output_options="$local_output|$srt_output"
+        echo "SRT 转发已启用；远端不可用时将自动重试，本地 WebRTC 不受影响。" >&2
+    else
+        output_options="$local_output"
+    fi
     if background_music_enabled; then
         ffmpeg -hide_banner -loglevel warning \
-            -f h264 -framerate "$OUTPUT_FPS" -i pipe:0 \
+            -thread_queue_size 1024 -f h264 -framerate "$OUTPUT_FPS" -i pipe:0 \
             -stream_loop -1 -i "$BACKGROUND_MUSIC_FILE" \
             -map 0:v:0 -map 1:a:0 \
             -c:v copy -bsf:v "$timing_filter" \
             -c:a copy \
-            -shortest -f mpegts \
-            "udp://127.0.0.1:$UDP_PORT?pkt_size=1316"
+            -shortest -f tee "$output_options"
     else
         ffmpeg -hide_banner -loglevel warning \
-            -f h264 -framerate "$OUTPUT_FPS" -i pipe:0 \
+            -thread_queue_size 1024 -f h264 -framerate "$OUTPUT_FPS" -i pipe:0 \
             -map 0:v:0 -c:v copy -bsf:v "$timing_filter" \
-            -f mpegts \
-            "udp://127.0.0.1:$UDP_PORT?pkt_size=1316"
+            -f tee "$output_options"
     fi
 }
 
@@ -308,25 +368,6 @@ stop_dashboard() {
     rm -f "$DASHBOARD_PID_FILE"
 }
 
-load_yolo_config() {
-    if [[ -r "$VISION_CONFIG" ]]; then
-        set -a
-        # shellcheck disable=SC1090
-        source "$VISION_CONFIG"
-        set +a
-        return 0
-    fi
-    # Temporary migration support. Remove after all boards use vision.env.
-    if [[ -r "$LEGACY_TRACKING_CONFIG" || -r "$LEGACY_LLM_CONFIG" ]]; then
-        echo "未找到 config/vision.env，使用旧配置；请迁移到统一配置。" >&2
-        set -a
-        [[ ! -r "$LEGACY_TRACKING_CONFIG" ]] || source "$LEGACY_TRACKING_CONFIG"
-        [[ ! -r "$LEGACY_LLM_CONFIG" ]] || source "$LEGACY_LLM_CONFIG"
-        set +a
-        [[ -z "${LLM_API_KEY:-}" ]] || VISION_LLM_ENABLED=yes
-    fi
-}
-
 stop_llm_bridge() {
     local pid
     [[ -r "$LLM_BRIDGE_PID_FILE" ]] || return 0
@@ -338,7 +379,7 @@ stop_llm_bridge() {
 run_yolo_publisher() {
     set -o pipefail
     export LD_LIBRARY_PATH="$VISION_DIR/lib:${LD_LIBRARY_PATH:-}"
-    load_yolo_config
+    load_vision_config
     start_dashboard
     start_llm_bridge
     capture_nv12 | normalize_nv12 | select_output_fps | \

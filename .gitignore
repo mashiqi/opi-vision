@@ -11,6 +11,10 @@
 /config/*.key
 /certs/
 
+# Personal cloud deployment configuration and unrelated local assets
+/config/mediamtx.yml.ToBeUploadToOnlineServer
+/config/nginx.conf.ToBeUploadToOnlineServer
+
 # 构建产物与缓存
 /src/**/build/
 /src/**/CMakeFiles/
