@@ -11,8 +11,9 @@ DEFAULT_VISION_ROTATE=180
 show_help() {
     cat <<'EOF'
 用法:
-  ./vision [--start] [--size 640x360|1280x720|1920x1080] [--fps 1-30]
-           [--encoder hardware|software] [--rotate 0|90|180|270]
+   ./vision [--start] [--size 640x360|1280x720|1920x1080] [--fps 1-30]
+            [--encoder hardware|software] [--rotate 0|90|180|270]
+            [--audio on|off]
   ./vision --status
   ./vision --log
   ./vision --stop
@@ -28,9 +29,15 @@ show_help() {
       默认: hardware.
   --rotate 0|90|180|270
       按顺时针方向旋转画面. 默认: 180. 当前不提供镜像功能.
-      Camera硬编码的1920x1080不支持90或270.
+       Camera硬编码的1920x1080不支持90或270.
+   --audio on|off
+       控制背景音乐循环播放. 默认: on.
+       设为 off 时仅推送视频流，无音频轨道.
+       如需更换音频，将 48kHz 双声道 Opus 文件命名为 audio.opus
+       放入 config/ 目录即可.
+       若文件缺失或格式不符，自动降级为纯视频推流，不阻塞服务启动.
 
-管理命令:
+ 管理命令:
   --status  显示运行摘要和系统状态.
   --log     显示进程详情和最近日志.
   --stop    停止视觉服务.
@@ -63,12 +70,20 @@ size_seen=false
 fps_seen=false
 encoder_seen=false
 rotate_seen=false
+audio_seen=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --start|--status|--log|--stop|--help)
             [[ -z "$action" ]] || argument_error "每次必须且只能指定一个动作."
             action=$1
             shift
+            ;;
+        --audio)
+            [[ "$audio_seen" == false ]] || argument_error "--audio 不可重复."
+            [[ $# -ge 2 && "$2" != --* ]] || argument_error "--audio 后缺少 on 或 off."
+            audio_seen=true
+            case "$2" in on|off) vision_audio_enabled=$2 ;; *) argument_error "--audio 必须是 on 或 off" ;; esac
+            shift 2
             ;;
         --size)
             [[ "$size_seen" == false ]] || argument_error "--size 不可重复."
@@ -106,6 +121,7 @@ done
 [[ "$fps_seen" == false || "$action" == --start ]] || argument_error "--fps 只能与 --start 同时使用."
 [[ "$encoder_seen" == false || "$action" == --start ]] || argument_error "--encoder 只能用于启动."
 [[ "$rotate_seen" == false || "$action" == --start ]] || argument_error "--rotate 只能用于启动."
+[[ "$audio_seen" == false || "$action" == --start ]] || argument_error "--audio 只能用于启动."
 case "$vision_size" in
     640x360|1280x720|1920x1080) ;;
     *) argument_error "非法尺寸: $vision_size" ;;
@@ -573,19 +589,30 @@ start_vision() {
     else
         verify_hardware_encoder || return 1
     fi
-    [[ -r "$BACKGROUND_MUSIC_FILE" && -s "$BACKGROUND_MUSIC_FILE" ]] || {
-        echo "缺少背景音乐 Opus 文件: $BACKGROUND_MUSIC_FILE" >&2; return 1;
-    }
-    ffprobe -v error -select_streams a:0 \
-        -show_entries stream=codec_name -of csv=p=0 \
-        "$BACKGROUND_MUSIC_FILE" 2>/dev/null | grep -qx 'opus' || {
-        echo "背景音乐必须是可解码的 Opus 音轨: $BACKGROUND_MUSIC_FILE" >&2; return 1;
-    }
-    ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels \
-        -of csv=p=0 "$BACKGROUND_MUSIC_FILE" 2>/dev/null | grep -qx '48000,2' || {
-        echo "背景音乐必须为 48 kHz 双声道 Opus: $BACKGROUND_MUSIC_FILE" >&2; return 1;
-    }
-    VISION_AUDIO_ENABLED=yes
+    if [[ "$vision_audio_enabled" == off ]]; then
+        VISION_AUDIO_ENABLED=no
+    elif [[ -r "$BACKGROUND_MUSIC_FILE" && -s "$BACKGROUND_MUSIC_FILE" ]]; then
+        local audio_valid=true
+        ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name -of csv=p=0 \
+            "$BACKGROUND_MUSIC_FILE" 2>/dev/null | grep -qx 'opus' || {
+            echo "警告: 背景音乐不是 Opus 格式，音频已禁用." >&2; audio_valid=false;
+        }
+        if [[ "$audio_valid" == true ]]; then
+            ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate,channels \
+                -of csv=p=0 "$BACKGROUND_MUSIC_FILE" 2>/dev/null | grep -qx '48000,2' || {
+                echo "警告: 背景音乐非 48kHz 双声道，音频已禁用." >&2; audio_valid=false;
+            }
+        fi
+        if [[ "$audio_valid" == true ]]; then
+            VISION_AUDIO_ENABLED=yes
+        else
+            VISION_AUDIO_ENABLED=no
+        fi
+    else
+        echo "警告: 找不到背景音乐文件 $BACKGROUND_MUSIC_FILE，音频已禁用." >&2
+        VISION_AUDIO_ENABLED=no
+    fi
     export VISION_AUDIO_ENABLED
     for file in "$MEDIAMTX_BIN" "$ISP3A_BIN"; do
         [[ -x "$file" ]] || { echo "找不到可执行文件: $file" >&2; return 1; }
@@ -688,24 +715,27 @@ show_bytetrack_metrics() {
 }
 
 show_background_music_status() {
-    local loop_status pgid
-    echo -n "背景音乐文件: $BACKGROUND_MUSIC_FILE"
-    if ! background_music_enabled; then
-        echo " (不可用)"
-        echo "背景音乐: 不可用"
+    local loop_status pgid audio_state
+    if [[ "$VISION_AUDIO_ENABLED" == no ]]; then
+        audio_state=已关闭
+    elif [[ ! -r "$BACKGROUND_MUSIC_FILE" || ! -s "$BACKGROUND_MUSIC_FILE" ]]; then
+        audio_state=文件缺失
+    elif ! background_music_enabled; then
+        audio_state=文件故障
+    else
+        loop_status=未运行
+        if publisher_is_running; then
+            read -r pgid < "$PUBLISHER_PGID_FILE"
+            if pgrep -g "$pgid" -f -- "$BACKGROUND_MUSIC_FILE" >/dev/null 2>&1; then
+                loop_status=循环播放中
+            else
+                loop_status=异常
+            fi
+        fi
+        echo "背景音乐: $BACKGROUND_MUSIC_FILE ($loop_status)"
         return
     fi
-    echo " (可用)"
-    loop_status=未运行
-    if publisher_is_running; then
-        read -r pgid < "$PUBLISHER_PGID_FILE"
-        if pgrep -g "$pgid" -f -- "$BACKGROUND_MUSIC_FILE" >/dev/null 2>&1; then
-            loop_status=循环播放中
-        else
-            loop_status=异常
-        fi
-    fi
-    echo "背景音乐: 预制 Opus, $loop_status"
+    echo "背景音乐: $audio_state"
 }
 
 show_status() {

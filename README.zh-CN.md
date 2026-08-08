@@ -1,7 +1,7 @@
 # OrangePi Vision
 
 <p align="center">
-  <img src="docs/images/banner.png" alt="OrangePi Vision 边缘视觉服务" width="720">
+  <img src="docs/assets/banner.png" alt="OrangePi Vision 边缘视觉服务" width="720">
 </p>
 
 <p align="center">
@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/ma-shiqi/opi-vision"><img src="https://img.shields.io/badge/platform-ARM64%20%7C%20OrangePi%20ZERO%203W-orange" alt="Platform"></a>
-  <a href="#访问方式"><img src="https://img.shields.io/badge/protocols-RTSP%20%7C%20WebRTC%20%7C%20SRT-1c94b5" alt="Protocols"></a>
+  <a href="#访问方式"><img src="https://img.shields.io/badge/protocols-WebRTC%20%7C%20RTSP%20%7C%20SRT-1c94b5" alt="Protocols"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20%7C%20MPL--2.0-blue" alt="License"></a>
 </p>
 
@@ -21,13 +21,11 @@
 
 ## 系统架构
 
-```text
-IMX219 → NV12 → H.264 + Opus (MPEG-TS)
-                 ├─ 本地 MediaMTX → RTSP / WebRTC
-                 └─ 加密 SRT → 云端 MediaMTX → WebRTC
-```
+<p align="center">
+  <img src="docs/assets/architecture-zh.svg" alt="OrangePi Vision 架构图" width="720">
+</p>
 
-默认使用 Camera 模式；YOLO 模式可在编码前插入 YOLO26s 与 ByteTrack。运行期音频为 `config/stream.opus`（48 kHz、双声道）；板端 HLS 已关闭。
+默认使用 Camera 模式；YOLO 模式可在编码前插入 YOLO26s 与 ByteTrack。运行期音频为 `config/audio.opus`（48 kHz、双声道）；板端 HLS 已关闭。
 
 ## 快速开始
 
@@ -39,16 +37,14 @@ chmod +x vision vision-withyolo bin/* src/src-camera/build-board-tools.sh
 ```
 
 ```bash
+./vision
 ./vision --start --size 1280x720 --fps 20
-./vision-withyolo --size 1280x720 --fps 20
+./vision --start --audio off
 ./vision --status
 ./vision --log
 ./vision --stop
 ```
-
-<p align="center">
-  <img src="docs/images/camera-demo.png" alt="通过 WebRTC 播放器查看的实时相机画面" width="720">
-</p>
+<p align="center"><img src="docs/assets/camera-demo.gif" alt="通过 WebRTC 播放器查看的实时相机画面" width="720"></p>
 
 <p align="center"><em>通过 WebRTC 播放器查看的实时相机画面。</em></p>
 
@@ -58,9 +54,9 @@ chmod +x vision vision-withyolo bin/* src/src-camera/build-board-tools.sh
 
 | 协议 | 地址 | 用途 |
 |---|---|---|
-| WebRTC | `http://&lt;板卡IP&gt;:8889/vision` | 局域网低延迟预览 |
-| RTSP | `rtsp://&lt;板卡IP&gt;:8554/vision` | VLC、NVR、RTSP 客户端 |
-| 公网 WebRTC | `https://&lt;你的域名&gt;/vision/` | 云端部署 |
+| WebRTC | `http://<板卡IP>:8889/vision` | 局域网低延迟预览 |
+| RTSP | `rtsp://<板卡IP>:8554/vision` | VLC、NVR、RTSP 客户端 |
+| 公网 WebRTC | `https://<你的域名>/vision/` | 云端部署 |
 
 ## 配置
 
@@ -88,10 +84,8 @@ cp config/vision.env.example config/vision.env
 
 ## 文档
 
-- [V2 WebRTC 部署与验收](docs/V2_WebRTC部署与验收.md)
-- [SRT 公网部署方案](docs/SRT公网部署方案.md)
-- [运行交接记录](docs/HANDOFF.md)
-- [FRP + HLS 旧方案](docs/VISION_FRP_NGINX_HTTPS部署指南.md)
+- [部署与运维指南](docs/部署与运维指南.md) — 板端配置、云端部署、日常运维
+- [V1 FRP + HLS 旧方案（已归档）](docs/V1_FRP_HLS_部署方案.md)
 - [YOLO26 交叉编译与板端部署](src/src-yolo26/README.md)
 - [Cedarc 运行时与硬件编码](src/src-cedarc/vendor/CEDARC_HARDWARE_ENCODING.md)
 

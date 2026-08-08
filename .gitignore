@@ -26,6 +26,11 @@
 __pycache__/
 *.py[cod]
 
+# 个人笔记与临时备份
+docs/个人总结.txt
+*.bak
+camera-demo.mp4
+
 # 临时部署文件与编辑器文件
 /bin/*.new
 /bin/*.bak
@@ -36,3 +41,5 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+.claude/
+.codewhale/

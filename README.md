@@ -1,7 +1,7 @@
 # OrangePi Vision
 
 <p align="center">
-  <img src="docs/images/banner.png" alt="OrangePi Vision edge vision service" width="720">
+  <img src="docs/assets/banner.png" alt="OrangePi Vision edge vision service" width="720">
 </p>
 
 <p align="center">
@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/ma-shiqi/opi-vision"><img src="https://img.shields.io/badge/platform-ARM64%20%7C%20OrangePi%20ZERO%203W-orange" alt="Platform"></a>
-  <a href="#access"><img src="https://img.shields.io/badge/protocols-RTSP%20%7C%20WebRTC%20%7C%20SRT-1c94b5" alt="Protocols"></a>
+  <a href="#access"><img src="https://img.shields.io/badge/protocols-WebRTC%20%7C%20RTSP%20%7C%20SRT-1c94b5" alt="Protocols"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20%7C%20MPL--2.0-blue" alt="License"></a>
 </p>
 
@@ -21,13 +21,11 @@
 
 ## Architecture
 
-```text
-IMX219 → NV12 → H.264 + Opus (MPEG-TS)
-                 ├─ Local MediaMTX → RTSP / WebRTC
-                 └─ Encrypted SRT → Cloud MediaMTX → WebRTC
-```
+<p align="center">
+  <img src="docs/assets/architecture-en.svg" alt="OrangePi Vision Architecture" width="720">
+</p>
 
-Camera mode is the default. YOLO mode optionally inserts YOLO26s and ByteTrack before encoding. Audio is `config/stream.opus` (48 kHz stereo); board-side HLS is disabled.
+Camera mode is the default. YOLO mode optionally inserts YOLO26s and ByteTrack before encoding. Audio is `config/audio.opus` (48 kHz stereo); board-side HLS is disabled.
 
 ## Quick start
 
@@ -39,16 +37,15 @@ chmod +x vision vision-withyolo bin/* src/src-camera/build-board-tools.sh
 ```
 
 ```bash
+./vision
 ./vision --start --size 1280x720 --fps 20
-./vision-withyolo --size 1280x720 --fps 20
+./vision --start --audio off
 ./vision --status
 ./vision --log
 ./vision --stop
 ```
 
-<p align="center">
-  <img src="docs/images/camera-demo.png" alt="Live camera view through the WebRTC player" width="720">
-</p>
+<p align="center"><img src="docs/assets/camera-demo.gif" alt="Live camera demo" width="720"></p>
 
 <p align="center"><em>Live camera view through the WebRTC player.</em></p>
 
@@ -58,9 +55,9 @@ Stop the service before changing mode, resolution, frame rate, encoder, or rotat
 
 | Protocol | Endpoint | Use |
 |---|---|---|
-| WebRTC | `http://&lt;board-ip&gt;:8889/vision` | Low-latency LAN preview |
-| RTSP | `rtsp://&lt;board-ip&gt;:8554/vision` | VLC, NVR, and RTSP clients |
-| Public WebRTC | `https://&lt;your-domain&gt;/vision/` | Cloud deployment |
+| WebRTC | `http://<board-ip>:8889/vision` | Low-latency LAN preview |
+| RTSP | `rtsp://<board-ip>:8554/vision` | VLC, NVR, and RTSP clients |
+| Public WebRTC | `https://<your-domain>/vision/` | Cloud deployment |
 
 ## Configuration
 
@@ -88,10 +85,8 @@ Cloud deployment templates are [`config/mediamtx.yml.ToBeUploadToOnlineServer.ex
 
 ## Documentation
 
-- [V2 WebRTC deployment and acceptance record](docs/V2_WebRTC部署与验收.md)
-- [SRT public deployment guide](docs/SRT公网部署方案.md)
-- [Operations handoff](docs/HANDOFF.md)
-- [Legacy FRP + HLS guide](docs/VISION_FRP_NGINX_HTTPS部署指南.md)
+- [部署与运维指南](docs/部署与运维指南.md) — 板端配置、云端部署、日常运维
+- [V1 FRP + HLS 旧方案（已归档）](docs/V1_FRP_HLS_部署方案.md)
 - [YOLO26 cross-compilation and board deployment](src/src-yolo26/README.md)
 - [Cedarc runtime and hardware encoding](src/src-cedarc/vendor/CEDARC_HARDWARE_ENCODING.md)
 

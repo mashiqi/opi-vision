@@ -6,7 +6,7 @@ LOG_DIR="$VISION_DIR/log"
 BIN_DIR="$VISION_DIR/bin"
 CONFIG_DIR="$VISION_DIR/config"
 # 原始下载地址: https://pixabay.com/sound-effects/nature-tranquil-stream-387678/
-BACKGROUND_MUSIC_FILE="$CONFIG_DIR/stream.opus"
+BACKGROUND_MUSIC_FILE="$CONFIG_DIR/audio.opus"
 MEDIAMTX_BIN="$BIN_DIR/mediamtx"
 MEDIAMTX_CONFIG="$CONFIG_DIR/mediamtx.yml"
 EXPECTED_MEDIAMTX_SHA256=5BDAF5BA8BCB8E2A502F5CF96EE8BAF39D11CFC257F12EBAC304F4B0307C7C92
@@ -258,34 +258,32 @@ encode_h264_software() {
 }
 
 mux_h264_stream() {
-    local timing_filter
-    if [[ "$VISION_ENCODER" == hardware ]]; then
-        timing_filter="h264_metadata=tick_rate=$((OUTPUT_FPS * 2)),setts=pts=N*DURATION:dts=N*DURATION:duration=DURATION"
-    else
-        timing_filter="setts=pts=N*DURATION:dts=N*DURATION:duration=DURATION"
-    fi
-    local output_options local_output srt_output
-    local_output="[f=mpegts:onfail=ignore]udp://127.0.0.1:$UDP_PORT?pkt_size=1316"
+    local local_output mux_format mux_options
+    local_output="udp://127.0.0.1:$UDP_PORT?pkt_size=1316"
     if srt_is_configured; then
+        local srt_output
         srt_output="[f=fifo:fifo_format=mpegts:onfail=ignore:queue_size=512:attempt_recovery=1:recover_any_error=1:recovery_wait_time=5:drop_pkts_on_overflow=1:restart_with_keyframe=1]srt://${VISION_SRT_CLOUD_HOST}:8890?mode=caller&latency=${VISION_SRT_LATENCY_MS}&passphrase=${VISION_SRT_PASSPHRASE}&pbkeylen=16&streamid=publish:vision:${VISION_SRT_USERNAME}:${VISION_SRT_PASSWORD}"
-        output_options="$local_output|$srt_output"
+        mux_format="tee"
+        mux_options="[f=mpegts:onfail=ignore]$local_output|$srt_output"
         echo "SRT 转发已启用；远端不可用时将自动重试，本地 WebRTC 不受影响。" >&2
     else
-        output_options="$local_output"
+        mux_format="mpegts"
+        mux_options="$local_output"
     fi
     if background_music_enabled; then
         ffmpeg -hide_banner -loglevel warning \
-            -thread_queue_size 1024 -f h264 -framerate "$OUTPUT_FPS" -i pipe:0 \
+            -use_wallclock_as_timestamps 1 \
+            -thread_queue_size 1024 -f h264 -i pipe:0 \
             -stream_loop -1 -i "$BACKGROUND_MUSIC_FILE" \
             -map 0:v:0 -map 1:a:0 \
-            -c:v copy -bsf:v "$timing_filter" \
-            -c:a copy \
-            -shortest -f tee "$output_options"
+            -c:v copy -c:a copy \
+            -shortest -f "$mux_format" "$mux_options"
     else
         ffmpeg -hide_banner -loglevel warning \
-            -thread_queue_size 1024 -f h264 -framerate "$OUTPUT_FPS" -i pipe:0 \
-            -map 0:v:0 -c:v copy -bsf:v "$timing_filter" \
-            -f tee "$output_options"
+            -use_wallclock_as_timestamps 1 \
+            -thread_queue_size 1024 -f h264 -i pipe:0 \
+            -map 0:v:0 -c:v copy \
+            -f "$mux_format" "$mux_options"
     fi
 }
 
