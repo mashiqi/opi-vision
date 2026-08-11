@@ -4,6 +4,8 @@
 
 OrangePi Zero 3W + IMX219 视觉推流。Shell 脚本驱动，硬编码 H.264 + Opus 音频 → UDP → MediaMTX → WebRTC/RTSP。
 
+- 实时时间戳叠加：`./vision --start --timestamp on`，在 NV12 阶段（硬编码前）用 `bin/nv12-timestamp` 写入视频帧左上角。源码 `src/src-camera/nv12-timestamp.c`，标准 VGA 8×16 位图字体，纯 C（零依赖）。
+
 ## 项目文档
 
 主要部署和运维文档：`docs/部署与运维指南.md`。

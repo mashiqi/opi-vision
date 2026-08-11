@@ -36,6 +36,10 @@ show_help() {
        如需更换音频，将 48kHz 双声道 Opus 文件命名为 audio.opus
        放入 config/ 目录即可.
        若文件缺失或格式不符，自动降级为纯视频推流，不阻塞服务启动.
+  --timestamp on|off
+      在视频左上角叠加实时时间戳 (系统本地时间). 默认: off.
+      设为 on 时需先编译 nv12-timestamp 二进制:
+      cd src/src-camera && bash build-board-tools.sh
 
  管理命令:
   --status  显示运行摘要和系统状态.
@@ -66,11 +70,13 @@ vision_fps=$DEFAULT_VISION_FPS
 vision_encoder=$DEFAULT_VISION_ENCODER
 vision_rotate=$DEFAULT_VISION_ROTATE
 vision_audio_enabled=auto
+vision_timestamp_enabled=off
 size_seen=false
 fps_seen=false
 encoder_seen=false
 rotate_seen=false
 audio_seen=false
+timestamp_seen=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --start|--status|--log|--stop|--help)
@@ -113,6 +119,13 @@ while [[ $# -gt 0 ]]; do
             vision_rotate=$2
             shift 2
             ;;
+        --timestamp)
+            [[ "$timestamp_seen" == false ]] || argument_error "--timestamp 不可重复."
+            [[ $# -ge 2 && "$2" != --* ]] || argument_error "--timestamp 后缺少 on 或 off."
+            timestamp_seen=true
+            case "$2" in on|off) vision_timestamp_enabled=$2 ;; *) argument_error "--timestamp 必须是 on 或 off" ;; esac
+            shift 2
+            ;;
         *) argument_error "未知参数: $1" ;;
     esac
 done
@@ -122,6 +135,7 @@ done
 [[ "$encoder_seen" == false || "$action" == --start ]] || argument_error "--encoder 只能用于启动."
 [[ "$rotate_seen" == false || "$action" == --start ]] || argument_error "--rotate 只能用于启动."
 [[ "$audio_seen" == false || "$action" == --start ]] || argument_error "--audio 只能用于启动."
+[[ "$timestamp_seen" == false || "$action" == --start ]] || argument_error "--timestamp 只能用于启动."
 case "$vision_size" in
     640x360|1280x720|1920x1080) ;;
     *) argument_error "非法尺寸: $vision_size" ;;
@@ -154,17 +168,20 @@ if [[ "$action" != --start && -r "$PROFILE_FILE" ]]; then
     saved_encoder=$(profile_raw_value encoder 2>/dev/null || true)
     saved_rotate=$(profile_raw_value rotate 2>/dev/null || true)
     saved_audio=$(profile_raw_value audio_enabled 2>/dev/null || true)
+    saved_timestamp=$(profile_raw_value timestamp_enabled 2>/dev/null || true)
     case "$saved_size" in 640x360|1280x720|1920x1080) vision_size=$saved_size ;; esac
     [[ "$saved_fps" =~ ^([1-9]|[12][0-9]|30)$ ]] && vision_fps=$saved_fps
     case "$saved_mode" in camera|yolo) vision_mode=$saved_mode ;; esac
     case "$saved_encoder" in hardware|software) vision_encoder=$saved_encoder ;; esac
     case "$saved_rotate" in 0|90|180|270) vision_rotate=$saved_rotate ;; esac
     case "$saved_audio" in yes|no) vision_audio_enabled=$saved_audio ;; esac
+    case "$saved_timestamp" in on|off) vision_timestamp_enabled=$saved_timestamp ;; esac
 fi
 
 export VISION_DIR VISION_SIZE=$vision_size VISION_FPS=$vision_fps \
     VISION_MODE=$vision_mode VISION_ENCODER=$vision_encoder \
-    VISION_ROTATE=$vision_rotate VISION_AUDIO_ENABLED=$vision_audio_enabled
+    VISION_ROTATE=$vision_rotate VISION_AUDIO_ENABLED=$vision_audio_enabled \
+    VISION_TIMESTAMP_ENABLED=$vision_timestamp_enabled
 # shellcheck source=vision-common.sh
 source "$SCRIPT_DIR/vision-common.sh"
 load_vision_config
@@ -624,6 +641,12 @@ start_vision() {
     [[ "$NV12_NORMALIZER_MODE" == bypass || -x "$NV12_NORMALIZER_BIN" ]] || {
         echo "找不到可执行文件: $NV12_NORMALIZER_BIN" >&2; return 1;
     }
+    if [[ "$vision_timestamp_enabled" == on ]]; then
+        [[ -x "$NV12_TIMESTAMP_BIN" ]] || {
+            echo "找不到可执行文件: $NV12_TIMESTAMP_BIN (请先运行 src/src-camera/build-board-tools.sh)" >&2
+            return 1
+        }
+    fi
     [[ -r "$MEDIAMTX_CONFIG" ]] || { echo "找不到配置: $MEDIAMTX_CONFIG" >&2; return 1; }
     if [[ "$VISION_MODE" == yolo ]]; then
         [[ -x "$YOLO_BIN" ]] || { echo "找不到可执行文件: $YOLO_BIN" >&2; return 1; }
@@ -647,9 +670,10 @@ start_vision() {
         echo "MediaMTX 启动失败, 请查看 $LOG_DIR/mediamtx.log " >&2; stop_vision || true; return 1;
     }
 
-    setsid bash -c 'VISION_DIR=$1 VISION_SIZE=$2 VISION_FPS=$3 VISION_MODE=$4 VISION_ENCODER=$5 VISION_ROTATE=$6 VISION_AUDIO_ENABLED=$7 VISION_LLM_ENABLED=$8; export VISION_DIR VISION_SIZE VISION_FPS VISION_MODE VISION_ENCODER VISION_ROTATE VISION_AUDIO_ENABLED VISION_LLM_ENABLED; source "$9"; run_publisher_with_log_maintenance' _ \
+    setsid bash -c 'VISION_DIR=$1 VISION_SIZE=$2 VISION_FPS=$3 VISION_MODE=$4 VISION_ENCODER=$5 VISION_ROTATE=$6 VISION_AUDIO_ENABLED=$7 VISION_TIMESTAMP_ENABLED=$8 VISION_LLM_ENABLED=$9; export VISION_DIR VISION_SIZE VISION_FPS VISION_MODE VISION_ENCODER VISION_ROTATE VISION_AUDIO_ENABLED VISION_TIMESTAMP_ENABLED VISION_LLM_ENABLED; source "${10}"; run_publisher_with_log_maintenance' _ \
         "$VISION_DIR" "$VISION_SIZE" "$VISION_FPS" "$VISION_MODE" \
         "$VISION_ENCODER" "$VISION_ROTATE" "$VISION_AUDIO_ENABLED" \
+        "$vision_timestamp_enabled" \
         "${VISION_LLM_ENABLED:-no}" \
         "$SCRIPT_DIR/vision-common.sh" \
         >>"$LOG_DIR/publisher.log" 2>&1 &
@@ -673,15 +697,16 @@ start_vision() {
     }
 
     if [[ "$VISION_MODE" == yolo ]]; then yolo_enabled=yes; else yolo_enabled=no; fi
-    printf 'size=%s\nwidth=%s\nheight=%s\noutput_width=%s\noutput_height=%s\nfps=%s\nbitrate=%s\nmode=%s\nyolo_enabled=%s\nencoder=%s\nrotate=%s\naudio_enabled=%s\n' \
+    printf 'size=%s\nwidth=%s\nheight=%s\noutput_width=%s\noutput_height=%s\nfps=%s\nbitrate=%s\nmode=%s\nyolo_enabled=%s\nencoder=%s\nrotate=%s\naudio_enabled=%s\ntimestamp_enabled=%s\n' \
         "$VISION_SIZE" "$CAPTURE_WIDTH" "$CAPTURE_HEIGHT" \
         "$OUTPUT_WIDTH" "$OUTPUT_HEIGHT" "$OUTPUT_FPS" \
         "$VIDEO_BITRATE_BPS" "$VISION_MODE" "$yolo_enabled" \
         "$VISION_ENCODER" "$VISION_ROTATE" "$VISION_AUDIO_ENABLED" \
+        "$vision_timestamp_enabled" \
         > "$PROFILE_FILE"
 
     ip=$(hostname -I | awk '{print $1}')
-    echo "视觉流已启动: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}, ${OUTPUT_FPS} FPS, 模式=${VISION_MODE}, 编码=${VISION_ENCODER}, 旋转=${VISION_ROTATE}°."
+    echo "视觉流已启动: ${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}, ${OUTPUT_FPS} FPS, 模式=${VISION_MODE}, 编码=${VISION_ENCODER}, 旋转=${VISION_ROTATE}°, 时间戳=${vision_timestamp_enabled}."
     echo "WebRTC: http://$ip:8889/vision"
     echo "RTSP:   rtsp://$ip:8554/vision"
     show_srt_status

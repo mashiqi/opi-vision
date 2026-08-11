@@ -18,6 +18,7 @@ YOLO_BIN="$BIN_DIR/yolo26_a733"
 ISP3A_BIN="$BIN_DIR/isp3a-daemon"
 NV12_NORMALIZER_BIN="$BIN_DIR/vin-nv12-normalizer"
 HW_ENCODER_BIN="${HW_ENCODER_BIN:-$BIN_DIR/aw-h264-encoder}"
+NV12_TIMESTAMP_BIN="$BIN_DIR/nv12-timestamp"
 LLM_BRIDGE_PY="$VISION_DIR/src/src-llm/llm_bridge.py"
 LLM_BRIDGE_LOG="$LOG_DIR/llm_bridge.log"
 LLM_BRIDGE_PID_FILE="$RUNTIME_DIR/llm_bridge.pid"
@@ -46,6 +47,7 @@ VISION_MODE="${VISION_MODE:-camera}"
 VISION_ENCODER="${VISION_ENCODER:-hardware}"
 VISION_ROTATE="${VISION_ROTATE:-180}"
 VISION_AUDIO_ENABLED="${VISION_AUDIO_ENABLED:-auto}"
+VISION_TIMESTAMP_ENABLED="${VISION_TIMESTAMP_ENABLED:-off}"
 VISION_SRT_CLOUD_HOST="${VISION_SRT_CLOUD_HOST:-}"
 VISION_SRT_PASSPHRASE="${VISION_SRT_PASSPHRASE:-}"
 VISION_SRT_USERNAME="${VISION_SRT_USERNAME:-}"
@@ -217,6 +219,27 @@ select_output_fps() {
         fdsink fd=1 sync=false
 }
 
+overlay_timestamp_nv12() {
+    if [[ "$VISION_TIMESTAMP_ENABLED" != on ]]; then
+        cat
+        return
+    fi
+    "$NV12_TIMESTAMP_BIN" \
+        --width "$CAPTURE_WIDTH" --height "$CAPTURE_HEIGHT" \
+        --rotate "$VISION_ROTATE"
+}
+
+# YOLO 已做旋转，帧已正向，直接画时间戳即可
+overlay_timestamp_yolo() {
+    if [[ "$VISION_TIMESTAMP_ENABLED" != on ]]; then
+        cat
+        return
+    fi
+    "$NV12_TIMESTAMP_BIN" \
+        --width "$OUTPUT_WIDTH" --height "$OUTPUT_HEIGHT" \
+        --rotate 0
+}
+
 rotate_nv12_for_software() {
     if [[ "$VISION_ROTATE" == 0 ]]; then
         cat
@@ -291,11 +314,13 @@ run_camera_publisher() {
     set -o pipefail
     if [[ "$VISION_ENCODER" == hardware ]]; then
         capture_nv12 | normalize_nv12 | select_output_fps | \
+            overlay_timestamp_nv12 | \
             encode_h264_hardware "$CAPTURE_WIDTH" "$CAPTURE_HEIGHT" \
                 "$ROTATION_CODE" | \
             mux_h264_stream
     else
         capture_nv12 | normalize_nv12 | select_output_fps | \
+            overlay_timestamp_nv12 | \
             rotate_nv12_for_software | \
             encode_h264_software "$OUTPUT_WIDTH" "$OUTPUT_HEIGHT" | \
             mux_h264_stream
@@ -381,7 +406,8 @@ run_yolo_publisher() {
     start_dashboard
     start_llm_bridge
     capture_nv12 | normalize_nv12 | select_output_fps | \
-        run_yolo_nv12 | encode_oriented_nv12 | mux_h264_stream
+        run_yolo_nv12 | overlay_timestamp_yolo | \
+        encode_oriented_nv12 | mux_h264_stream
     stop_llm_bridge
     stop_dashboard
 }
