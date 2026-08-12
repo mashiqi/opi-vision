@@ -61,29 +61,115 @@ static const unsigned char font[13][16] = {
 #define CHAR_W  8
 #define CHAR_H 16
 
+
 /*
- * 在输出空间中绘制一个字符（纯白字）。
- * (char_ox, char_oy) = 字符左上角在最终输出画面中的坐标。
- * rotate = 编码器将应用的顺时针旋转角度。
- * 本函数通过逆旋转映射找到对应输入帧中的像素位置并写入。
+ * 采样字符区域的背景亮度
+ * 
+ * 参数说明：
+ *   @frame      : NV12 帧的 Y 平面数据（输入帧，旋转前）
+ *   @W_in       : 输入帧宽度（旋转前）
+ *   @H_in       : 输入帧高度（旋转前）
+ *   @char_ox    : 字符左上角在输出空间（旋转后）的 X 坐标
+ *   @char_oy    : 字符左上角在输出空间（旋转后）的 Y 坐标
+ *   @rotate     : 编码器将应用的顺时针旋转角度（0/90/180/270）
+ *
+ * 返回值：
+ *   返回字符区域的平均亮度值 (0-255)，如果采样失败则返回 128
+ *
+ * 注意：
+ *   - 本函数在绘制字符之前调用，此时 frame 中尚未写入任何时间戳像素
+ *   - 采样区域为字符本身的 8×16 区域 (即将绘制的位置)
+ *   - 由于采样先于绘制，因此不会采到时间戳本身，无正反馈问题
+ *   - 通过逆旋转映射，确保采样位置与绘制位置一致
+ */
+static int sample_background(
+    unsigned char *frame,    /* 输入帧 Y 平面数据 */
+    int W_in,                /* 输入帧宽度（旋转前） */
+    int H_in,                /* 输入帧高度（旋转前） */
+    int char_ox,             /* 输出空间字符左上角 X（旋转后） */
+    int char_oy,             /* 输出空间字符左上角 Y（旋转后） */
+    int rotate)              /* 编码器旋转角度：0/90/180/270 */
+{
+    int sum = 0;
+    int count = 0;
+
+    /* 采样字符区域 (此时 frame 还是原始帧，未绘制任何像素) */
+    //int step_H = CHAR_H / 2;
+    //int step_W = CHAR_W / 2;
+    for (int dy = 0; dy < CHAR_H; dy++) {
+        for (int dx = 0; dx < CHAR_W; dx++) {
+            int ox = char_ox + dx;
+            int oy = char_oy + dy;
+
+            /* 逆映射到输入帧坐标 */
+            int ix, iy;
+            switch (rotate) {
+            case 0:
+                ix = ox; iy = oy; break;
+            case 90:
+                ix = oy; iy = H_in - 1 - ox; break;
+            case 180:
+                ix = W_in - 1 - ox; iy = H_in - 1 - oy; break;
+            case 270:
+                ix = W_in - 1 - oy; iy = ox; break;
+            default:
+                return 150;
+            }
+
+            if (ix < 0 || ix >= W_in || iy < 0 || iy >= H_in) continue;
+
+            sum += frame[iy * W_in + ix];
+            count++;
+        }
+    }
+
+    return (count > 0) ? (sum / count) : 150;
+}
+
+
+
+/*
+ * 在输出空间中绘制一个字符
+ * 
+ * 参数说明：
+ *   @frame      : NV12 帧的 Y 平面数据（输入帧，旋转前）
+ *   @W_in       : 输入帧宽度（旋转前）
+ *   @H_in       : 输入帧高度（旋转前）
+ *   @char_ox    : 字符左上角在输出空间（旋转后）的 X 坐标
+ *   @char_oy    : 字符左上角在输出空间（旋转后）的 Y 坐标
+ *   @ch         : 要绘制的字符（ASCII）
+ *   @rotate     : 编码器将应用的顺时针旋转角度（0/90/180/270）
+ *
+ * 注意：
+ *   - 本函数在输入帧上绘制，但坐标计算基于输出空间
+ *   - 通过逆旋转映射，确保编码器旋转后文字在正确位置
+ *   - (char_ox, char_oy) = 字符左上角在最终输出画面中的坐标
+ *   - 函数内部会根据字符区域的背景亮度自动选择文字颜色
  */
 static void draw_char_output_space(
-    unsigned char *frame,
-    int W_in, int H_in,
-    int char_ox, int char_oy,
-    unsigned char ch,
-    int rotate)
+    unsigned char *frame,    /* 输入帧 Y 平面数据 */
+    int W_in,                /* 输入帧宽度（旋转前） */
+    int H_in,                /* 输入帧高度（旋转前） */
+    int char_ox,             /* 输出空间字符左上角 X（旋转后） */
+    int char_oy,             /* 输出空间字符左上角 Y（旋转后） */
+    unsigned char ch,        /* 要绘制的 ASCII 字符 */
+    int rotate)              /* 编码器旋转角度：0/90/180/270 */
 {
     const unsigned char *glyph = font[font_index[ch]];
     int brow, bcol;
-
+    
+    // 第一步：采样背景（在绘制之前，使用 char_ox, char_oy）
+    int avg_bg = sample_background(frame, W_in, H_in, char_ox, char_oy, rotate);
+    int color = (avg_bg < 150) ? 200 : 50;
+    
+    // 第二步：用计算好的颜色绘制
     for (brow = 0; brow < CHAR_H; brow++) {
         unsigned char row = glyph[brow];
         for (bcol = 0; bcol < CHAR_W; bcol++) {
             if (!(row & (1 << (7 - bcol))))
                 continue;
 
-            /* 该像素在输出画面中的坐标 */
+            /* 该像素在输出画面中的x坐标 */
             int ox = char_ox + bcol;
             int oy = char_oy + brow;
 
@@ -91,30 +177,21 @@ static void draw_char_output_space(
             int ix, iy;
             switch (rotate) {
             case 0:
-                ix = ox;
-                iy = oy;
-                break;
+                ix = ox; iy = oy; break;
             case 90:
-                ix = oy;
-                iy = H_in - 1 - ox;
-                break;
+                ix = oy; iy = H_in - 1 - ox; break;
             case 180:
-                ix = W_in - 1 - ox;
-                iy = H_in - 1 - oy;
-                break;
+                ix = W_in - 1 - ox; iy = H_in - 1 - oy; break;
             case 270:
-                ix = W_in - 1 - oy;
-                iy = ox;
-                break;
+                ix = W_in - 1 - oy; iy = ox; break;
             default:
                 return;
             }
 
-            if (ix < 0 || ix >= W_in || iy < 0 || iy >= H_in)
-                continue;
-
+            if (ix < 0 || ix >= W_in || iy < 0 || iy >= H_in) continue;
+            
             /* 写入 Y 平面 */
-            frame[iy * W_in + ix] = 200;
+            frame[iy * W_in + ix] = color;
         }
     }
 }
@@ -191,10 +268,7 @@ int main(int argc, char *argv[])
         int text_len = (int)strlen(time_str);
         int k;
         for (k = 0; k < text_len; k++) {
-            draw_char_output_space(frame, W, H,
-                margin + k * CHAR_W, margin,
-                (unsigned char)time_str[k],
-                rotate);
+            draw_char_output_space(frame, W, H, margin + k * CHAR_W, margin, (unsigned char)time_str[k], rotate);
         }
 
         total = 0;

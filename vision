@@ -37,7 +37,7 @@ show_help() {
        放入 config/ 目录即可.
        若文件缺失或格式不符，自动降级为纯视频推流，不阻塞服务启动.
   --timestamp on|off
-      在视频左上角叠加实时时间戳 (系统本地时间). 默认: off.
+      在视频左上角叠加实时时间戳 (系统本地时间). 默认: on.
       设为 on 时需先编译 nv12-timestamp 二进制:
       cd src/src-camera && bash build-board-tools.sh
 
@@ -70,7 +70,7 @@ vision_fps=$DEFAULT_VISION_FPS
 vision_encoder=$DEFAULT_VISION_ENCODER
 vision_rotate=$DEFAULT_VISION_ROTATE
 vision_audio_enabled=auto
-vision_timestamp_enabled=off
+vision_timestamp_enabled=on
 size_seen=false
 fps_seen=false
 encoder_seen=false
@@ -765,7 +765,7 @@ show_background_music_status() {
 
 show_status() {
     local current_size current_fps current_mode current_encoder current_rotate
-    local current_bitrate current_output running=false
+    local current_bitrate current_timestamp current_output running=false
     if service_fully_running; then
         running=true
         current_size=$(profile_value size)
@@ -774,9 +774,10 @@ show_status() {
         current_encoder=$(profile_value encoder)
         current_rotate=$(profile_value rotate)
         current_bitrate=$(profile_value bitrate)
+        current_timestamp=$(profile_value timestamp_enabled 2>/dev/null || true)
         current_output="$(profile_value output_width)x$(profile_value output_height)"
         echo "视觉服务运行中: 模式=$current_mode, 编码=$current_encoder"
-        echo "画面: $current_output, $current_fps FPS, $((current_bitrate / 1000)) Kbps, 旋转 ${current_rotate}°"
+        echo "画面: $current_output, $current_fps FPS, $((current_bitrate / 1000)) Kbps, 旋转 ${current_rotate}°, 时间戳 ${current_timestamp:-off}"
     elif module_processes_running || runtime_state_exists; then
         current_mode=camera
         echo "视觉服务运行不完整; 请使用 ./vision --log 查看技术详情."
